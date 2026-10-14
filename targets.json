@@ -1,0 +1,43 @@
+{
+  "app_id": "252490",
+  "steam_user_secret": "STEAM_USER",
+  "steam_pass_secret": "STEAM_PASS",
+  "steam_guard_secret": "STEAM_GUARD",
+  "il2cpp_dumper_version": "6.7.46-lxraa.1",
+  "classes": {
+    "BaseNetworkable": {
+      "fields": ["clientEntities"],
+      "static": true
+    },
+    "BasePlayer": {
+      "fields": [
+        "_position",
+        "_health",
+        "_maxHealth",
+        "_displayName",
+        "_team",
+        "_isLocalPlayer",
+        "_isDead",
+        "_playerModel",
+        "_userID"
+      ],
+      "static": false
+    },
+    "PlayerModel": {
+      "fields": ["_headPosition"],
+      "static": false
+    },
+    "MainCamera": {
+      "fields": ["_viewMatrix"],
+      "static": true
+    },
+    "BaseCombatEntity": {
+      "fields": ["_health", "_maxHealth"],
+      "static": false
+    },
+    "BaseEntity": {
+      "fields": ["_position", "_rotation"],
+      "static": false
+    }
+  }
+}

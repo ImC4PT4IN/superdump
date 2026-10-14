@@ -1,0 +1,2 @@
+# No external deps — everything uses stdlib.
+# jq and steamcmd are installed via apt in the workflow.

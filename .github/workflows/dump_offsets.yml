@@ -1,0 +1,235 @@
+name: Dump Rust Offsets
+
+on:
+  schedule:
+    # Every 6 hours. Rust patches Thursday.
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force_dump:
+        description: 'Force a dump even if build ID is unchanged'
+        type: boolean
+        default: false
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      issues: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y steamcmd jq python3-pip unzip
+          pip3 install -r scripts/requirements.txt
+
+      - name: Check Steam manifest for update
+        id: manifest
+        run: |
+          APP_ID=$(jq -r '.app_id' targets.json)
+          CURRENT=$(curl -sf "https://api.steamcmd.net/v1/info/${APP_ID}" \
+            | jq -r ".data.\"${APP_ID}\".depots.branches.public.buildid" || echo "0")
+
+          if [ -z "$CURRENT" ] || [ "$CURRENT" = "null" ]; then
+            echo "::error::Failed to fetch build ID from steamcmd.net"
+            exit 1
+          fi
+
+          CACHED=$(cat .last_buildid 2>/dev/null || echo "0")
+
+          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+          echo "cached=$CACHED"   >> $GITHUB_OUTPUT
+
+          if [ "$CURRENT" != "$CACHED" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "Build changed: $CACHED → $CURRENT"
+          elif [ "${{ inputs.force_dump }}" = "true" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "Forced dump (build unchanged)"
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "No update. Build ID: $CACHED"
+          fi
+
+      - name: Download Rust client via SteamCMD
+        if: steps.manifest.outputs.changed == 'true'
+        env:
+          STEAM_USER: ${{ secrets[fromJSON('targets.json').steam_user_secret] || secrets.STEAM_USER }}
+          STEAM_PASS: ${{ secrets[fromJSON('targets.json').steam_pass_secret] || secrets.STEAM_PASS }}
+          STEAM_GUARD: ${{ secrets[fromJSON('targets.json').steam_guard_secret] || secrets.STEAM_GUARD }}
+        run: |
+          APP_ID=$(jq -r '.app_id' targets.json)
+          mkdir -p /tmp/rust /tmp/steam
+
+          if [ -z "$STEAM_USER" ] || [ -z "$STEAM_PASS" ]; then
+            echo "::error::Steam credentials not set. Client files require auth."
+            exit 1
+          fi
+
+          # Build login command. Steam Guard optional.
+          LOGIN_ARGS="+login $STEAM_USER $STEAM_PASS"
+          if [ -n "$STEAM_GUARD" ]; then
+            # SteamCMD accepts guard code as part of login or via the prompt.
+            # We pipe it in so the workflow doesn't hang.
+            echo "$STEAM_GUARD" > /tmp/steamguard.txt
+          fi
+
+          # Download the client. Anonymous won't work — client depot needs ownership.
+          # force_install_dir must be absolute.
+          steamcmd \
+            +force_install_dir /tmp/rust \
+            $LOGIN_ARGS \
+            +app_update $APP_ID validate \
+            +quit || {
+              echo "::error::SteamCMD download failed"
+              exit 1
+            }
+
+          # Verify the files we need exist
+          ls -la /tmp/rust/RustClient_Data/il2cpp_data/Metadata/
+          ls -la /tmp/rust/GameAssembly.dll
+
+          if [ ! -f /tmp/rust/GameAssembly.dll ]; then
+            echo "::error::GameAssembly.dll not found after download"
+            exit 1
+          fi
+          if [ ! -f /tmp/rust/RustClient_Data/il2cpp_data/Metadata/global-metadata.dat ]; then
+            echo "::error::global-metadata.dat not found after download"
+            exit 1
+          fi
+
+      - name: Copy target files
+        if: steps.manifest.outputs.changed == 'true'
+        run: |
+          cp /tmp/rust/GameAssembly.dll /tmp/GameAssembly.dll
+          cp /tmp/rust/RustClient_Data/il2cpp_data/Metadata/global-metadata.dat \
+             /tmp/global-metadata.dat
+
+      - name: Download IL2CPP Dumper
+        if: steps.manifest.outputs.changed == 'true'
+        run: |
+          VERSION=$(jq -r '.il2cpp_dumper_version' targets.json)
+
+          # lxraa fork — supports metadata v32-v39 (Unity 6)
+          URL="https://github.com/lxraa/Il2CppDumper/releases/download/v${VERSION}/Il2CppDumper-net8-linux-x64.zip"
+
+          curl -sfL "$URL" -o /tmp/il2cpp.zip || {
+            # Fallback to Perfare upstream
+            echo "::warning::lxraa fork download failed, trying Perfare upstream"
+            URL="https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.46/Il2CppDumper-net6-linux-x64.zip"
+            curl -sfL "$URL" -o /tmp/il2cpp.zip
+          }
+
+          unzip -q /tmp/il2cpp.zip -d /tmp/il2cpp
+          chmod +x /tmp/il2cpp/Il2CppDumper
+          /tmp/il2cpp/Il2CppDumper --help 2>&1 | head -5 || true
+
+      - name: Run IL2CPP Dumper
+        if: steps.manifest.outputs.changed == 'true'
+        run: |
+          mkdir -p /tmp/output
+          cd /tmp/output
+
+          /tmp/il2cpp/Il2CppDumper \
+            /tmp/GameAssembly.dll \
+            /tmp/global-metadata.dat \
+            /tmp/output || {
+              echo "::error::IL2CPP Dumper failed"
+              exit 1
+            }
+
+          echo "=== Dumper output ==="
+          ls -la /tmp/output/
+          echo "=== dump.cs head ==="
+          head -80 /tmp/output/dump.cs
+          echo "=== dump.cs line count ==="
+          wc -l /tmp/output/dump.cs
+
+      - name: Parse offsets
+        if: steps.manifest.outputs.changed == 'true'
+        id: parse
+        run: |
+          python3 scripts/parse_offsets.py \
+            /tmp/output/dump.cs \
+            targets.json \
+            offsets.h || {
+              echo "::error::Parser failed"
+              exit 1
+            }
+
+      - name: Validate offsets
+        if: steps.manifest.outputs.changed == 'true'
+        id: validate
+        run: |
+          python3 scripts/validate_offsets.py \
+            /tmp/output/dump.cs \
+            targets.json \
+            offsets.h > /tmp/validation_report.txt 2>&1
+
+          EXIT=$?
+          cat /tmp/validation_report.txt
+
+          if [ $EXIT -ne 0 ]; then
+            echo "::warning::Validation found missing offsets"
+            echo "validation_failed=true" >> $GITHUB_OUTPUT
+          else
+            echo "validation_failed=false" >> $GITHUB_OUTPUT
+          fi
+          exit 0  # Don't fail yet — we still want to commit the partial header
+
+      - name: Update cached build ID
+        if: steps.manifest.outputs.changed == 'true'
+        run: |
+          echo "${{ steps.manifest.outputs.current }}" > .last_buildid
+
+      - name: Commit and push
+        if: steps.manifest.outputs.changed == 'true'
+        id: commit
+        run: |
+          git config user.name 'offsets-bot'
+          git config user.email 'offsets-bot@users.noreply.github.com'
+
+          git add offsets.h .last_buildid
+          git diff --staged --quiet && echo "No changes to commit" && exit 0
+
+          git commit -m "Update offsets (build ${{ steps.manifest.outputs.current }})"
+          git push
+
+          echo "committed=true" >> $GITHUB_OUTPUT
+
+      - name: Notify on validation failure
+        if: steps.manifest.outputs.changed == 'true' && steps.validate.outputs.validation_failed == 'true'
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          python3 scripts/notify.py \
+            --title "⚠️ Offset validation warning" \
+            --message "Build ${{ steps.manifest.outputs.current }} dumped, but some offsets are missing. Check the validation report." \
+            --report /tmp/validation_report.txt
+
+      - name: Notify on success
+        if: steps.manifest.outputs.changed == 'true' && steps.commit.outputs.committed == 'true' && steps.validate.outputs.validation_failed != 'true'
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          python3 scripts/notify.py \
+            --title "✅ Offsets updated" \
+            --message "Build ${{ steps.manifest.outputs.current }} dumped. All targets found."
+
+      - name: Notify on failure
+        if: failure()
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          python3 scripts/notify.py \
+            --title "❌ Offset pipeline failed" \
+            --message "Workflow failed at step: ${{ github.job }}. Check logs."
