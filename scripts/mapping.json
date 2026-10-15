@@ -1,0 +1,43 @@
+{
+  "offsets": {
+    "BasePlayer": {
+      "playerModel":  { "offset": "0x838", "type": "PlayerModel",     "static": false },
+      "_displayName": { "offset": "0xAE8", "type": "string",          "static": false },
+      "userIDString": { "offset": "0xAD8", "type": "string",          "static": false },
+      "currentTeam":  { "offset": "0x958", "type": "ulong",           "static": false },
+      "playerFlags":  { "offset": "0xA88", "type": "PlayerFlags",     "static": false },
+      "inventory":    { "offset": "0xA98", "type": "PlayerInventory", "static": false },
+      "clActiveItem": { "offset": "0x998", "type": "ItemId",          "static": false }
+    },
+    "BaseCombatEntity": {
+      "startHealth":     { "offset": "0x210", "type": "float",    "static": false },
+      "lifestate":       { "offset": "0x274", "type": "LifeState","static": false },
+      "ShowHealthInfo":  { "offset": "0x270", "type": "bool",     "static": false },
+      "baseProtection":  { "offset": "0x208", "type": "ProtectionProperties", "static": false }
+    },
+    "BaseEntity": {
+      "model":  { "offset": "0xC8", "type": "Model",  "static": false },
+      "bounds": { "offset": "0xA0", "type": "Bounds", "static": false },
+      "flags":  { "offset": "0xD0", "type": "Flags",  "static": false }
+    },
+    "PlayerModel": {
+      "position":      { "offset": "0x1D0", "type": "Vector3",     "static": false },
+      "headBone":      { "offset": "0x48",  "type": "GameObject",  "static": false },
+      "neckBone":      { "offset": "0x40",  "type": "GameObject",  "static": false },
+      "jawBone":       { "offset": "0x38",  "type": "GameObject",  "static": false },
+      "SpineBones":    { "offset": "0x60",  "type": "Transform[]", "static": false },
+      "leftFootBone":  { "offset": "0x68",  "type": "Transform",   "static": false },
+      "rightFootBone": { "offset": "0x70",  "type": "Transform",   "static": false }
+    },
+    "Model": {
+      "boneTransforms": { "offset": "0x50", "type": "Transform[]", "static": false },
+      "headBone":       { "offset": "0x30", "type": "Transform",   "static": false },
+      "rootBone":       { "offset": "0x28", "type": "Transform",   "static": false }
+    }
+  },
+  "type_info": {
+    "BaseEntity":    "0x3c8df20",
+    "MainCamera":    "0x3c701c8",
+    "BaseGameMode":  "0x3c8e188"
+  }
+}
