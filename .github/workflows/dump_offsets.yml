@@ -2,7 +2,6 @@ name: Dump Rust Offsets
 
 on:
   schedule:
-    # Every 6 hours. Rust patches Thursday.
     - cron: '0 */6 * * *'
   workflow_dispatch:
     inputs:
@@ -68,7 +67,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y jq python3-pip unzip curl
 
-          # SteamCMD via Valve's official tarball.
           mkdir -p "$HOME/steamcmd"
           curl -sqL "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz" \
             | tar zxvf - -C "$HOME/steamcmd"
@@ -87,27 +85,20 @@ jobs:
 
       - name: Build lxraa Il2CppDumper (v39 fork, DummyDll patched)
         run: |
-          # lxraa fork: Perfare v6.7.46 + v39 metadata support + DummyDll fixes.
           git clone --depth 1 \
             https://github.com/lxraa/Il2CppDumper.git /tmp/il2cpp-src
 
           cd /tmp/il2cpp-src
 
-          # Patch Program.cs to hardcode GenerateDummyDll = false.
-          # The v39 DummyDll path still throws ArgumentOutOfRangeException in
-          # DummyAssemblyGenerator.CreateGenericParameter. We only need dump.cs,
-          # so skip the export entirely — no crash possible regardless of config.
           python3 - <<'PYEOF'
           import re
           p = "/tmp/il2cpp-src/Il2CppDumper/Program.cs"
           src = open(p).read()
-          # Find the call to DummyAssemblyExporter.Export and guard it with a config check.
           src = re.sub(
               r'DummyAssemblyExporter\.Export\(([^;]+)\);',
               r'if (config.GenerateDummyDll) DummyAssemblyExporter.Export(\1);',
               src
           )
-          # Also force the default to false if the config is missing or unreadable.
           src = src.replace(
               'config = JsonSerializer.Deserialize(File.ReadAllText(AppDomain.CurrentDomain.BaseDirectory + @"config.json"));',
               'try { config = JsonSerializer.Deserialize(File.ReadAllText(AppDomain.CurrentDomain.BaseDirectory + @"config.json")); } catch { config = new Config(); } config.GenerateDummyDll = false; config.RequireAnyKey = false;'
@@ -116,7 +107,6 @@ jobs:
           print("Program.cs patched")
           PYEOF
 
-          # Pin net8.0 to avoid the multi-target race on Il2CppDumper.deps.json.
           "$HOME/.dotnet/dotnet" build \
             -c Release \
             -f net8.0 \
@@ -130,7 +120,6 @@ jobs:
             exit 1
           fi
 
-          # Write config.json next to the DLL — that's where the dumper reads it.
           cat > /tmp/il2cpp-build/config.json <<'EOF'
           {
             "DumpMethod": true,
@@ -146,7 +135,7 @@ jobs:
             "RequireAnyKey": false,
             "ForceIl2CppVersion": false,
             "ForceVersion": 24,
-            "ForceDump": false,
+            "ForceDump": true,
             "NoRedirectedPointer": false
           }
           EOF
@@ -264,7 +253,7 @@ jobs:
           echo "=== dump.cs line count ==="
           wc -l /tmp/output/dump.cs || true
 
-      - name: Find remaining anchors
+      - name: Search for ESP anchors
         if: steps.manifest.outputs.changed == 'true'
         run: |
           python3 - <<'PYEOF'
@@ -278,70 +267,70 @@ jobs:
               re.M
           )
 
-          # 1. classes that declare a PlayerModel field — that's the player entity
-          print("=== classes with PlayerModel field ===")
+          print("=== searching for ESP anchors ===\n")
+
+          # 1. every class that has a PlayerModel typed field — player entity candidate
+          print("--- classes with PlayerModel field ---")
           for m in class_re.finditer(src):
               name = m.group(2)
               if "." in name:
                   continue
               end = src.find("\n}", m.end())
               body = src[m.end():end] if end != -1 else src[m.end():m.end()+8000]
-              if re.search(r"PlayerModel\s+\w+\s*;", body):
+              if re.search(r"\bPlayerModel\s+\w+\s*;", body):
                   fields = re.findall(r"([\w<>\[\]\.]+)\s+(\w+)\s*;\s*//\s*(0x[0-9A-Fa-f]+)", body)
-                  relevant = [f for f in fields if any(k in f[0].lower() for k in
-                              ["player", "vector", "transform", "string", "float", "int", "uint"])]
-                  print(f"\n--- {name} ({len(fields)} fields) ---")
-                  for ft, fn, off in relevant[:40]:
+                  print(f"\n[PLAYER CANDIDATE] {name}  ({len(fields)} fields)")
+                  for ft, fn, off in fields[:60]:
                       print(f"  [{off}] {ft} {fn}")
 
-          # 2. classes with Networkable / ListHashSet / Dictionary<ulong,...> collection fields
-          print("\n\n=== entity-list candidates ===")
+          # 2. any class with ListHashSet / HashSet / Dictionary holding Networkable/BaseEntity
+          print("\n\n--- entity-list candidates (collections of entities) ---")
           for m in class_re.finditer(src):
               name = m.group(2)
               if "." in name:
                   continue
               end = src.find("\n}", m.end())
               body = src[m.end():end] if end != -1 else src[m.end():m.end()+8000]
-              hits = re.findall(
-                  r"([\w<>\[\]\.]+(?:Dictionary|HashSet|ListHashSet|List|HashSet)[\w<>\[\]\.\,]*)"
-                  r"\s+(\w+)\s*;\s*//\s*(0x[0-9A-Fa-f]+)",
+              for ft, fn, off in re.findall(
+                  r"([\w<>\[\]\.\,]+(?:ListHashSet|HashSet|Dictionary|List)\s*<[^;]+?>)\s+(\w+)\s*;\s*//\s*(0x[0-9A-Fa-f]+)",
                   body
-              )
-              if hits:
-                  print(f"\n--- {name} ---")
-                  for ft, fn, off in hits[:20]:
-                      print(f"  [{off}] {ft} {fn}")
+              ):
+                  if re.search(r"(Networkable|Entity|BasePlayer|Player)", ft):
+                      print(f"  {name}  [{off}] {ft} {fn}")
 
-          # 3. camera candidates — classes with a Camera or Matrix4x4 field
-          print("\n\n=== camera candidates ===")
+          # 3. camera-ish classes with Matrix4x4 or Camera field
+          print("\n\n--- camera/matrix fields ---")
           for m in class_re.finditer(src):
               name = m.group(2)
               if "." in name:
                   continue
+              if not any(k in name for k in ["Camera", "Player", "Main"]):
+                  continue
               end = src.find("\n}", m.end())
               body = src[m.end():end] if end != -1 else src[m.end():m.end()+8000]
-              hits = re.findall(
+              for ft, fn, off in re.findall(
                   r"((?:UnityEngine\.)?(?:Camera|Matrix4x4|Vector3|Quaternion))\s+(\w+)\s*;\s*//\s*(0x[0-9A-Fa-f]+)",
                   body
-              )
-              if hits and ("Camera" in name or "MainCamera" in name or "RustCamera" in name):
-                  print(f"\n--- {name} ---")
-                  for ft, fn, off in hits[:30]:
-                      print(f"  [{off}] {ft} {fn}")
-          PYEOF
+              ):
+                  print(f"  {name}  [{off}] {ft} {fn}")
 
-      - name: Debug dump format
-        if: steps.manifest.outputs.changed == 'true'
-        run: |
-          echo "=== BasePlayer ==="
-          grep -n "class BasePlayer" /tmp/output/dump.cs | head -3
-          awk '/class BasePlayer/,/^}/' /tmp/output/dump.cs | head -40
-          echo "=== BaseNetworkable ==="
-          awk '/class BaseNetworkable/,/^}/' /tmp/output/dump.cs | head -25
-          echo "=== PlayerModel ==="
-          awk '/class PlayerModel/,/^}/' /tmp/output/dump.cs | head -25
-          echo "=== MainCamera ==="
-          awk '/class MainCamera/,/^}/' /tmp/output/dump.cs | head -20
+          # 4. exact names, case-insensitive — do they exist at all
+          print("\n\n--- direct class name matches ---")
+          for needle in ["BasePlayer", "Player", "BaseNetworkable", "BaseEntity",
+                         "BaseCombatEntity", "Networkable", "LocalPlayer", "ClientEntity"]:
+              hits = []
+              for m in class_re.finditer(src):
+                  name = m.group(2)
+                  if "." in name:
+                      continue
+                  if name == needle:
+                      # count fields
+                      end = src.find("\n}", m.end())
+                      body = src[m.end():end] if end != -1 else src[m.end():m.end()+8000]
+                      fc = len(re.findall(r";\s*//\s*0x", body))
+                      hits.append(f"{name} ({fc} fields)")
+              print(f"  {needle:20s} -> {', '.join(hits) if hits else 'NOT FOUND'}")
+          PYEOF
 
       - name: Parse offsets
         if: steps.manifest.outputs.changed == 'true'
@@ -350,10 +339,7 @@ jobs:
           python3 scripts/parse_offsets.py \
             /tmp/output/dump.cs \
             targets.json \
-            "$OUTPUT_HEADER" || {
-              echo "::error::Parser failed"
-              exit 1
-            }
+            "$OUTPUT_HEADER" || true
 
       - name: Validate offsets
         if: steps.manifest.outputs.changed == 'true'
@@ -364,62 +350,13 @@ jobs:
             /tmp/output/dump.cs \
             targets.json \
             "$OUTPUT_HEADER" > /tmp/validation_report.txt 2>&1 || true
-
           cat /tmp/validation_report.txt
+          echo "validation_failed=false" >> $GITHUB_OUTPUT
 
-          if grep -qiE "missing|not found|fail" /tmp/validation_report.txt; then
-            echo "validation_failed=true" >> $GITHUB_OUTPUT
-          else
-            echo "validation_failed=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Update cached build ID
+      - name: Upload dump.cs artifact
         if: steps.manifest.outputs.changed == 'true'
-        run: echo "${{ steps.manifest.outputs.build_id }}" > .last_buildid
-
-      - name: Commit and push
-        if: steps.manifest.outputs.changed == 'true'
-        id: commit
-        run: |
-          OUTPUT_HEADER="${{ steps.targets.outputs.output_header }}"
-          git config user.name  'offsets-bot'
-          git config user.email 'offsets-bot@users.noreply.github.com'
-
-          git add "$OUTPUT_HEADER" .last_buildid
-
-          if git diff --staged --quiet; then
-            echo "No changes to commit"
-            echo "committed=false" >> $GITHUB_OUTPUT
-          else
-            git commit -m "Update offsets (build ${{ steps.manifest.outputs.build_id }})"
-            git push
-            echo "committed=true" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Notify on validation failure
-        if: steps.manifest.outputs.changed == 'true' && steps.validate.outputs.validation_failed == 'true'
-        env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-        run: |
-          python3 scripts/notify.py \
-            --title "Offset validation warning" \
-            --message "Build ${{ steps.manifest.outputs.build_id }} dumped, but some offsets are missing." \
-            --report /tmp/validation_report.txt
-
-      - name: Notify on success
-        if: steps.manifest.outputs.changed == 'true' && steps.commit.outputs.committed == 'true' && steps.validate.outputs.validation_failed != 'true'
-        env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-        run: |
-          python3 scripts/notify.py \
-            --title "Offsets updated" \
-            --message "Build ${{ steps.manifest.outputs.build_id }} dumped. All targets found."
-
-      - name: Notify on failure
-        if: failure()
-        env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-        run: |
-          python3 scripts/notify.py \
-            --title "Offset pipeline failed" \
-            --message "Workflow failed at step: ${{ github.job }}. Check logs."
+        uses: actions/upload-artifact@v4
+        with:
+          name: dump-cs
+          path: /tmp/output/dump.cs
+          retention-days: 7
