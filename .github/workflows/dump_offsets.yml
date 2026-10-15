@@ -264,6 +264,24 @@ jobs:
           echo "=== dump.cs line count ==="
           wc -l /tmp/output/dump.cs || true
 
+      - name: Debug class bodies
+        if: steps.manifest.outputs.changed == 'true'
+        run: |
+          echo "=================== BasePlayer ==================="
+          awk '/^\s*(public |internal |private )?class BasePlayer /,/^}/' /tmp/output/dump.cs | head -50
+          echo ""
+          echo "=================== BaseNetworkable ==================="
+          awk '/^\s*(public |internal |private )?class BaseNetworkable /,/^}/' /tmp/output/dump.cs | head -40
+          echo ""
+          echo "=================== BaseCombatEntity ==================="
+          awk '/^\s*(public |internal |private )?class BaseCombatEntity /,/^}/' /tmp/output/dump.cs | head -30
+          echo ""
+          echo "=================== MainCamera (full) ==================="
+          awk '/^public class MainCamera :/,/^}/' /tmp/output/dump.cs | head -40
+          echo ""
+          echo "=================== BaseEntity ==================="
+          awk '/^\s*(public |internal |private )?class BaseEntity /,/^}/' /tmp/output/dump.cs | head -40
+
       - name: Debug dump format
         if: steps.manifest.outputs.changed == 'true'
         run: |
