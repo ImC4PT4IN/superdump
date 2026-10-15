@@ -80,24 +80,22 @@ jobs:
 
       - name: Install .NET SDK
         run: |
-          # .NET 8.0 SDK — used to build the roytu v39 fork from source.
           curl -sSL https://dot.net/v1/dotnet-install.sh \
             | bash /dev/stdin --channel 8.0
           echo "$HOME/.dotnet" >> $GITHUB_PATH
           "$HOME/.dotnet/dotnet" --version
 
-      - name: Build roytu Il2CppDumper (v39 fork)
+      - name: Build lxraa Il2CppDumper (v39 fork)
         run: |
-          # The roytu fork is the only Il2CppDumper branch with metadata v39
-          # support that compiles on Linux. No prebuilt binaries exist, so we
-          # clone and build it on the runner.
-          git clone --depth 1 --branch v39 \
-            https://github.com/roytu/Il2CppDumper.git /tmp/il2cpp-src
+          # lxraa fork is based on Perfare v6.7.46 with the v39 metadata support
+          # merged and the DummyDll regressions fixed. The roytu fork has a
+          # known IndexOutOfRangeException in DummyAssemblyGenerator on v39.
+          git clone --depth 1 \
+            https://github.com/lxraa/Il2CppDumper.git /tmp/il2cpp-src
 
           cd /tmp/il2cpp-src
 
-          # Pin the target framework to net8.0. The project multi-targets
-          # net6.0 and net8.0; building both into one -o dir causes a race
+          # Pin the target framework to net8.0 to avoid the multi-target race
           # on Il2CppDumper.deps.json ("being used by another process").
           "$HOME/.dotnet/dotnet" build \
             -c Release \
@@ -214,6 +212,29 @@ jobs:
         run: |
           mkdir -p /tmp/output
           cd /tmp/output
+
+          # Disable DummyDll generation and the exit prompt. We only need
+          # dump.cs for offset extraction. The DummyDll path is the crash
+          # source on v39 metadata.
+          cat > config.json <<'EOF'
+          {
+            "DumpMethod": true,
+            "DumpField": true,
+            "DumpProperty": true,
+            "DumpAttribute": false,
+            "DumpFieldOffset": true,
+            "DumpMethodOffset": true,
+            "DumpTypeDefIndex": true,
+            "GenerateDummyDll": false,
+            "GenerateScript": true,
+            "DummyDllAddToken": false,
+            "RequireAnyKey": false,
+            "ForceIl2CppVersion": false,
+            "ForceVersion": 24,
+            "ForceDump": false,
+            "NoRedirectedPointer": false
+          }
+          EOF
 
           "$HOME/.dotnet/dotnet" "$DUMPER_DLL" "$GAMEASSEMBLY" "$METADATA" /tmp/output || {
             echo "::error::IL2CPP Dumper failed"
