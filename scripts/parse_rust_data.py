@@ -69,7 +69,6 @@ def write_header(mapping: dict, dump: dict, out_path: str):
 
             found = ns.get(off)
             if not found:
-                # try to find by name as fallback
                 name_match = next((v for k, v in ns.items()
                                    if v["name"] == name), None)
                 if name_match:
@@ -83,7 +82,6 @@ def write_header(mapping: dict, dump: dict, out_path: str):
                 missing.append(f"{cls}::{name}")
                 continue
 
-            # type check: dump type comment contains expected type
             if expected_type and expected_type.lower() not in found["type"].lower():
                 lines.append(
                     f"    // TYPE DRIFT: {cls}::{name} @ {off} "
@@ -101,7 +99,6 @@ def write_header(mapping: dict, dump: dict, out_path: str):
 
         lines.append("")
 
-    # type info block
     if "type_info" in mapping:
         lines.append("    // ── TypeInfo ──")
         for name, addr in mapping["type_info"].items():
