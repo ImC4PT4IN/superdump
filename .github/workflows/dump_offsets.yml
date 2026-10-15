@@ -264,56 +264,52 @@ jobs:
           echo "=== dump.cs line count ==="
           wc -l /tmp/output/dump.cs || true
 
-      - name: Dump class bodies for reverse engineering
+      - name: Dump fields only
         if: steps.manifest.outputs.changed == 'true'
         run: |
           python3 - <<'PYEOF'
-          import re, sys
+          import re
 
           src = open("/tmp/output/dump.cs", encoding="utf-8", errors="ignore").read()
 
-          # find every top-level class/struct declaration with its full body
-          pattern = re.compile(
+          want = ["Networkable", "Player", "PlayerModel", "MainCamera",
+                  "BasePlayer", "BaseNetworkable", "BaseCombatEntity", "BaseEntity"]
+
+          class_re = re.compile(
               r"^((?:public |private |internal |protected )?"
               r"(?:sealed |abstract |static )*"
               r"(?:class|struct)\s+([\w.]+)[^\n]*\n\{)",
               re.M
           )
+          field_re = re.compile(
+              r"^\s*(public|private|protected|internal)?\s*"
+              r"(static\s+)?"
+              r"(?:readonly\s+)?"
+              r"([\w<>\[\]\.\,\?%]+)\s+"
+              r"([\w%<>\.]+)\s*"
+              r";\s*//\s*(0x[0-9A-Fa-f]+)"
+          )
 
-          targets = sys.argv[1:] if len(sys.argv) > 1 else [
-              "Networkable",
-              "Player",
-              "PlayerModel",
-              "MainCamera",
-          ]
-
-          # add the current camera/network classes from previous search
-          extra = ["BasePlayer", "BaseNetworkable", "BaseCombatEntity", "BaseEntity"]
-          targets = list(dict.fromkeys(targets + extra))
-
-          for match in pattern.finditer(src):
-              header_line = match.group(0)
-              class_name = match.group(2)
-
-              # strip nested helper classes ("Foo.<...>")
-              if "." in class_name:
+          for m in class_re.finditer(src):
+              name = m.group(2)
+              if "." in name or name not in want:
                   continue
+              end = src.find("\n}", m.end())
+              body = src[m.end():end] if end != -1 else src[m.end():m.end()+8000]
 
-              if class_name not in targets:
-                  continue
+              fields = []
+              for line in body.split("\n"):
+                  fm = field_re.match(line)
+                  if fm:
+                      vis, stat, ftype, fname, off = fm.groups()
+                      flags = []
+                      if stat: flags.append("static")
+                      if vis: flags.append(vis.strip())
+                      fields.append(f"  [{off}] {ftype} {fname}  ({' '.join(flags) or 'instance'})")
 
-              # find the end of the class body: first line that is exactly "}"
-              body_start = match.end()
-              end = src.find("\n}", body_start)
-              if end == -1:
-                  continue
-              body = src[match.start():end + 2]
-
-              print(f"\n{'=' * 60}")
-              print(f"CLASS: {class_name}")
-              print(f"{'=' * 60}")
-              print(body)
-              print()
+              print(f"\n===== {name} ({len(fields)} fields) =====")
+              for f in fields:
+                  print(f)
           PYEOF
 
       - name: Debug dump format
