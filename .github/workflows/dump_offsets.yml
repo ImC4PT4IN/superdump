@@ -264,65 +264,56 @@ jobs:
           echo "=== dump.cs line count ==="
           wc -l /tmp/output/dump.cs || true
 
-      - name: Find ESP anchors by structure
+      - name: Dump class bodies for reverse engineering
         if: steps.manifest.outputs.changed == 'true'
         run: |
           python3 - <<'PYEOF'
-          import re
+          import re, sys
+
           src = open("/tmp/output/dump.cs", encoding="utf-8", errors="ignore").read()
 
-          # Split into classes
-          blocks = re.split(r"\n(?=(?:public |private |internal |protected )?(?:sealed |abstract |static )*(?:class|struct) )", src)
+          # find every top-level class/struct declaration with its full body
+          pattern = re.compile(
+              r"^((?:public |private |internal |protected )?"
+              r"(?:sealed |abstract |static )*"
+              r"(?:class|struct)\s+([\w.]+)[^\n]*\n\{)",
+              re.M
+          )
 
-          def show(label, needle, limit=6):
-              print(f"\n=== {label} (searching for: {needle}) ===")
-              count = 0
-              for b in blocks:
-                  if needle not in b:
-                      continue
-                  # header line only
-                  header = b.split("\n", 1)[0]
-                  # show first 15 field lines
-                  field_lines = [l for l in b.split("\n") if re.search(r";\s*//\s*0x", l)][:15]
-                  if not field_lines:
-                      continue
-                  print(f"--- {header}")
-                  for fl in field_lines:
-                      print(f"    {fl.strip()}")
-                  count += 1
-                  if count >= limit:
-                      break
-              if count == 0:
-                  print(f"  (no matches)")
+          targets = sys.argv[1:] if len(sys.argv) > 1 else [
+              "Networkable",
+              "Player",
+              "PlayerModel",
+              "MainCamera",
+          ]
 
-          # 1. Classes with a ListHashSet field — entity list anchor
-          show("ListHashSet users", "ListHashSet<")
+          # add the current camera/network classes from previous search
+          extra = ["BasePlayer", "BaseNetworkable", "BaseCombatEntity", "BaseEntity"]
+          targets = list(dict.fromkeys(targets + extra))
 
-          # 2. Classes with a Matrix4x4 field — view matrix anchor
-          show("Matrix4x4 users", "Matrix4x4")
+          for match in pattern.finditer(src):
+              header_line = match.group(0)
+              class_name = match.group(2)
 
-          # 3. Classes with a PlayerModel field — player class anchor
-          show("PlayerModel users", "PlayerModel ")
+              # strip nested helper classes ("Foo.<...>")
+              if "." in class_name:
+                  continue
 
-          # 4. Anything named "Player" as a class
-          print("\n=== Exact class name 'Player' ===")
-          for b in blocks:
-              header = b.split("\n", 1)[0]
-              if re.match(r"^(?:public |private |internal )?(?:sealed |abstract )?class Player\b", header):
-                  print(header)
-                  for l in b.split("\n")[:25]:
-                      if re.search(r";\s*//\s*0x", l):
-                          print(f"    {l.strip()}")
+              if class_name not in targets:
+                  continue
 
-          # 5. Anything named "Networkable"
-          print("\n=== Exact class name 'Networkable' ===")
-          for b in blocks:
-              header = b.split("\n", 1)[0]
-              if re.match(r"^(?:public |private |internal )?(?:sealed |abstract )?class Networkable\b", header):
-                  print(header)
-                  for l in b.split("\n")[:25]:
-                      if re.search(r";\s*//\s*0x", l):
-                          print(f"    {l.strip()}")
+              # find the end of the class body: first line that is exactly "}"
+              body_start = match.end()
+              end = src.find("\n}", body_start)
+              if end == -1:
+                  continue
+              body = src[match.start():end + 2]
+
+              print(f"\n{'=' * 60}")
+              print(f"CLASS: {class_name}")
+              print(f"{'=' * 60}")
+              print(body)
+              print()
           PYEOF
 
       - name: Debug dump format
