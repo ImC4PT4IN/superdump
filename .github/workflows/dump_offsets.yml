@@ -2,7 +2,6 @@ name: Dump Rust Offsets
 
 on:
   schedule:
-    # Every 6 hours. Rust patches Thursday.
     - cron: '0 */6 * * *'
   workflow_dispatch:
     inputs:
@@ -30,11 +29,11 @@ jobs:
         id: targets
         run: |
           APP_ID=$(jq -r '.app_id' targets.json)
+          DEPOT_ID=$(jq -r '.depot_id' targets.json)
           DUMPER_VERSION=$(jq -r '.il2cpp_dumper_version' targets.json)
           OUTPUT_HEADER=$(jq -r '.output_header // "offsets.h"' targets.json)
-          DEPOT_ID=$(jq -r '.depot_id // "252491"' targets.json)
 
-          for v in APP_ID DUMPER_VERSION OUTPUT_HEADER DEPOT_ID; do
+          for v in APP_ID DEPOT_ID DUMPER_VERSION OUTPUT_HEADER; do
             if [ -z "${!v}" ] || [ "${!v}" = "null" ]; then
               echo "::error::$v missing from targets.json"
               exit 1
@@ -42,13 +41,12 @@ jobs:
           done
 
           echo "app_id=$APP_ID"                 >> $GITHUB_OUTPUT
+          echo "depot_id=$DEPOT_ID"             >> $GITHUB_OUTPUT
           echo "dumper_version=$DUMPER_VERSION" >> $GITHUB_OUTPUT
           echo "output_header=$OUTPUT_HEADER"   >> $GITHUB_OUTPUT
-          echo "depot_id=$DEPOT_ID"             >> $GITHUB_OUTPUT
 
       - name: Free disk space
         run: |
-          # Parallel deletes. Each backgrounded, then wait.
           sudo rm -rf /usr/share/dotnet            &
           sudo rm -rf /usr/local/lib/android      &
           sudo rm -rf /opt/ghc                     &
@@ -71,38 +69,47 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y jq python3-pip unzip curl
 
-          # SteamCMD via Valve's official tarball. No apt, no i386, no license prompt.
           mkdir -p "$HOME/steamcmd"
           curl -sqL "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz" \
             | tar zxvf - -C "$HOME/steamcmd"
 
-          # One-shot self-update. Prints noise on first run; ignore.
           "$HOME/steamcmd/steamcmd.sh" +quit || true
-
           echo "$HOME/steamcmd" >> $GITHUB_PATH
 
           pip3 install -r scripts/requirements.txt
 
-      - name: Check Steam manifest for update
+      - name: Resolve manifest ID for depot
         id: manifest
         run: |
           APP_ID="${{ steps.targets.outputs.app_id }}"
-          CURRENT=$(curl -sf "https://api.steamcmd.net/v1/info/${APP_ID}" \
-            | jq -r ".data.\"${APP_ID}\".depots.branches.public.buildid" 2>/dev/null || echo "")
+          DEPOT_ID="${{ steps.targets.outputs.depot_id }}"
 
-          if [ -z "$CURRENT" ] || [ "$CURRENT" = "null" ]; then
-            echo "::warning::steamcmd.net API failed; falling back to always-dump"
-            CURRENT="unknown"
+          # Fetch the current public manifest ID for the specific depot.
+          # SteamDB's API exposes depot-level manifest IDs via the app info endpoint.
+          MANIFEST_ID=$(curl -sf "https://api.steamcmd.net/v1/info/${APP_ID}" \
+            | jq -r ".data.\"${APP_ID}\".depots.\"${DEPOT_ID}\".manifests.public.gid" 2>/dev/null || echo "")
+
+          if [ -z "$MANIFEST_ID" ] || [ "$MANIFEST_ID" = "null" ]; then
+            echo "::error::Could not resolve manifest ID for depot ${DEPOT_ID}"
+            echo "=== Available depots in appinfo ==="
+            curl -sf "https://api.steamcmd.net/v1/info/${APP_ID}" \
+              | jq -r ".data.\"${APP_ID}\".depots | keys[]" 2>/dev/null | head -20
+            exit 1
           fi
+
+          echo "Resolved manifest: $MANIFEST_ID"
+          echo "manifest_id=$MANIFEST_ID" >> $GITHUB_OUTPUT
+
+          # Also grab the build ID for cache comparison.
+          BUILD_ID=$(curl -sf "https://api.steamcmd.net/v1/info/${APP_ID}" \
+            | jq -r ".data.\"${APP_ID}\".depots.branches.public.buildid" 2>/dev/null || echo "unknown")
+          echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
 
           CACHED=$(cat .last_buildid 2>/dev/null || echo "0")
 
-          echo "current=$CURRENT" >> $GITHUB_OUTPUT
-          echo "cached=$CACHED"   >> $GITHUB_OUTPUT
-
-          if [ "$CURRENT" != "$CACHED" ]; then
+          if [ "$BUILD_ID" != "$CACHED" ]; then
             echo "changed=true" >> $GITHUB_OUTPUT
-            echo "Build changed: $CACHED -> $CURRENT"
+            echo "Build changed: $CACHED -> $BUILD_ID"
           elif [ "${{ inputs.force_dump }}" = "true" ]; then
             echo "changed=true" >> $GITHUB_OUTPUT
             echo "Forced dump (build unchanged)"
@@ -111,7 +118,7 @@ jobs:
             echo "No update. Build ID: $CACHED"
           fi
 
-      - name: Download Rust client depot via SteamCMD
+      - name: Download Rust client depot
         if: steps.manifest.outputs.changed == 'true'
         env:
           STEAM_USER: ${{ secrets.STEAM_USER }}
@@ -119,22 +126,26 @@ jobs:
         run: |
           APP_ID="${{ steps.targets.outputs.app_id }}"
           DEPOT_ID="${{ steps.targets.outputs.depot_id }}"
+          MANIFEST_ID="${{ steps.manifest.outputs.manifest_id }}"
 
           if [ -z "$STEAM_USER" ] || [ -z "$STEAM_PASS" ]; then
             echo "::error::STEAM_USER / STEAM_PASS not configured"
             exit 1
           fi
 
-          # download_depot grabs a single depot — skips HD textures and DLC.
-          # Base depot is ~15 GB vs ~56 GB for the full app_update.
+          # download_depot with explicit manifest ID — bypasses the
+          # "Invalid default manifest" error that occurs when SteamCMD
+          # can't resolve a default manifest for this depot.
+          # Depot 252495 is the Windows 64-bit client depot (1.08 GiB),
+          # containing GameAssembly.dll and the IL2CPP metadata.
           "$HOME/steamcmd/steamcmd.sh" \
             +@sSteamCmdForcePlatformType windows \
             +login "$STEAM_USER" "$STEAM_PASS" \
-            +download_depot "$APP_ID" "$DEPOT_ID" \
+            +download_depot "$APP_ID" "$DEPOT_ID" "$MANIFEST_ID" \
             +quit
 
-          # download_depot ignores force_install_dir. Files land under
-          # $HOME/Steam/steamapps/content/app_<appid>/depot_<depotid>/
+          # download_depot ignores force_install_dir.
+          # Files land in $HOME/Steam/steamapps/content/app_<appid>/depot_<depotid>/
           STEAM_DEPOT_DIR="$HOME/Steam/steamapps/content/app_${APP_ID}/depot_${DEPOT_ID}"
 
           if [ ! -d "$STEAM_DEPOT_DIR" ]; then
@@ -144,7 +155,6 @@ jobs:
 
           if [ -z "$STEAM_DEPOT_DIR" ] || [ ! -d "$STEAM_DEPOT_DIR" ]; then
             echo "::error::depot directory not found after download"
-            echo "=== \$HOME/Steam tree ==="
             find "$HOME/Steam" -maxdepth 5 -type d 2>/dev/null | head -60
             exit 1
           fi
@@ -159,13 +169,11 @@ jobs:
 
           if [ -z "$GAMEASSEMBLY" ]; then
             echo "::error::GameAssembly.dll not found in depot"
-            echo "=== Largest files in depot ==="
             find "$STEAM_DEPOT_DIR" -maxdepth 5 -type f -printf '%s\t%p\n' 2>/dev/null | sort -rn | head -30
             exit 1
           fi
           if [ -z "$METADATA" ]; then
             echo "::error::global-metadata.dat not found in depot"
-            echo "=== All .dat files in depot ==="
             find "$STEAM_DEPOT_DIR" -maxdepth 6 -iname "*.dat" -print 2>/dev/null | head -20
             exit 1
           fi
@@ -228,8 +236,6 @@ jobs:
 
           echo "=== Dumper output ==="
           ls -la /tmp/output/
-          echo "=== dump.cs head ==="
-          head -80 /tmp/output/dump.cs
           echo "=== dump.cs line count ==="
           wc -l /tmp/output/dump.cs
 
@@ -265,7 +271,7 @@ jobs:
 
       - name: Update cached build ID
         if: steps.manifest.outputs.changed == 'true'
-        run: echo "${{ steps.manifest.outputs.current }}" > .last_buildid
+        run: echo "${{ steps.manifest.outputs.build_id }}" > .last_buildid
 
       - name: Commit and push
         if: steps.manifest.outputs.changed == 'true'
@@ -281,7 +287,7 @@ jobs:
             echo "No changes to commit"
             echo "committed=false" >> $GITHUB_OUTPUT
           else
-            git commit -m "Update offsets (build ${{ steps.manifest.outputs.current }})"
+            git commit -m "Update offsets (build ${{ steps.manifest.outputs.build_id }})"
             git push
             echo "committed=true" >> $GITHUB_OUTPUT
           fi
@@ -293,7 +299,7 @@ jobs:
         run: |
           python3 scripts/notify.py \
             --title "Offset validation warning" \
-            --message "Build ${{ steps.manifest.outputs.current }} dumped, but some offsets are missing. Check the validation report." \
+            --message "Build ${{ steps.manifest.outputs.build_id }} dumped, but some offsets are missing." \
             --report /tmp/validation_report.txt
 
       - name: Notify on success
@@ -303,7 +309,7 @@ jobs:
         run: |
           python3 scripts/notify.py \
             --title "Offsets updated" \
-            --message "Build ${{ steps.manifest.outputs.current }} dumped. All targets found."
+            --message "Build ${{ steps.manifest.outputs.build_id }} dumped. All targets found."
 
       - name: Notify on failure
         if: failure()
