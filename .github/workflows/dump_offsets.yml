@@ -112,9 +112,8 @@ jobs:
       - name: Download Rust client via SteamCMD
         if: steps.manifest.outputs.changed == 'true'
         env:
-          STEAM_USER:  ${{ secrets.STEAM_USER }}
-          STEAM_PASS:  ${{ secrets.STEAM_PASS }}
-          STEAM_GUARD: ${{ secrets.STEAM_GUARD }}
+          STEAM_USER: ${{ secrets.STEAM_USER }}
+          STEAM_PASS: ${{ secrets.STEAM_PASS }}
         run: |
           APP_ID="${{ steps.targets.outputs.app_id }}"
 
@@ -123,45 +122,15 @@ jobs:
             exit 1
           fi
 
-          # Generate a fresh Steam Guard TOTP from the shared_secret.
-          TOTP=""
-          if [ -n "$STEAM_GUARD" ]; then
-            TOTP=$(python3 - <<'PYEOF'
-import base64, hmac, hashlib, struct, time, os
-chars = "23456789BCDFGHJKMNPQRTVWXY"
-secret = base64.b64decode(os.environ["STEAM_GUARD"])
-ts = int(time.time()) // 30
-digest = hmac.new(secret, struct.pack(">Q", ts), hashlib.sha1).digest()
-off = digest[-1] & 0x0F
-code = struct.unpack(">I", digest[off:off+4])[0] & 0x7FFFFFFF
-out = ""
-for _ in range(5):
-    out += chars[code % len(chars)]
-    code //= len(chars)
-print(out)
-PYEOF
-)
-            echo "Generated TOTP for login"
-          fi
-
           mkdir -p /tmp/rust
 
           # Rust client is Windows-only. Force the Windows depot on Linux runner.
-          if [ -n "$TOTP" ]; then
-            "$HOME/steamcmd/steamcmd.sh" \
-              +@sSteamCmdForcePlatformType windows \
-              +force_install_dir /tmp/rust \
-              +login "$STEAM_USER" "$STEAM_PASS" "$TOTP" \
-              +app_update "$APP_ID" validate \
-              +quit
-          else
-            "$HOME/steamcmd/steamcmd.sh" \
-              +@sSteamCmdForcePlatformType windows \
-              +force_install_dir /tmp/rust \
-              +login "$STEAM_USER" "$STEAM_PASS" \
-              +app_update "$APP_ID" validate \
-              +quit
-          fi
+          "$HOME/steamcmd/steamcmd.sh" \
+            +@sSteamCmdForcePlatformType windows \
+            +force_install_dir /tmp/rust \
+            +login "$STEAM_USER" "$STEAM_PASS" \
+            +app_update "$APP_ID" validate \
+            +quit
 
           echo "=== /tmp/rust top-level ==="
           ls -la /tmp/rust/ | head -40
