@@ -6,14 +6,14 @@ on:
   workflow_dispatch:
     inputs:
       force_dump:
-        description: 'Force a fetch even if the source hash is unchanged'
+        description: 'Force a dump even if build ID is unchanged'
         type: boolean
         default: false
 
 jobs:
   dump:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 60
     permissions:
       contents: write
       issues: write
@@ -28,123 +28,223 @@ jobs:
       - name: Read targets.json
         id: targets
         run: |
-          OUT=$(jq -r '.output_header // "offsets.h"' targets.json)
-          URL=$(jq -r '.rust_data_url' targets.json)
+          APP_ID=$(jq -r '.app_id' targets.json)
+          DEPOT_ID=$(jq -r '.depot_id' targets.json)
+          OUTPUT_HEADER=$(jq -r '.output_header // "offsets.h"' targets.json)
 
-          for v in OUT URL; do
+          for v in APP_ID DEPOT_ID OUTPUT_HEADER; do
             if [ -z "${!v}" ] || [ "${!v}" = "null" ]; then
-              echo "::error::missing config in targets.json"
+              echo "::error::$v missing from targets.json"
               exit 1
             fi
           done
 
-          echo "output_header=$OUT"    >> $GITHUB_OUTPUT
-          echo "rust_data_url=$URL"    >> $GITHUB_OUTPUT
+          echo "app_id=$APP_ID"               >> $GITHUB_OUTPUT
+          echo "depot_id=$DEPOT_ID"           >> $GITHUB_OUTPUT
+          echo "output_header=$OUTPUT_HEADER" >> $GITHUB_OUTPUT
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet            &
+          sudo rm -rf /usr/local/lib/android      &
+          sudo rm -rf /opt/ghc                     &
+          sudo rm -rf /usr/local/share/boost      &
+          sudo rm -rf /usr/share/swift            &
+          sudo rm -rf /opt/hostedtoolcache/CodeQL &
+          wait
+          sudo rm -rf /opt/hostedtoolcache/node* &
+          sudo rm -rf /opt/hostedtoolcache/Java* &
+          sudo rm -rf /opt/hostedtoolcache/Ruby* &
+          sudo rm -rf /opt/hostedtoolcache/PyPy* &
+          wait
+          sudo docker image prune -af || true
+          df -h /
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq python3-pip
+          sudo apt-get install -y jq python3-pip unzip curl
+
+          mkdir -p "$HOME/steamcmd"
+          curl -sqL "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz" \
+            | tar zxvf - -C "$HOME/steamcmd"
+          "$HOME/steamcmd/steamcmd.sh" +quit || true
+          echo "$HOME/steamcmd" >> $GITHUB_PATH
+
           pip3 install -r scripts/requirements.txt 2>/dev/null || true
 
-      - name: Fetch rust.h
-        id: fetch
+      - name: Install Rust
         run: |
-          URL="${{ steps.targets.outputs.rust_data_url }}"
-          curl -sfL "$URL" -o /tmp/rust.h
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
-          if [ ! -s /tmp/rust.h ]; then
-            echo "::error::empty rust.h"
+      - name: Build rodroid dumper
+        run: |
+          git clone --depth 1 https://github.com/rodroidmods/il2cpp-dumper-rs.git /tmp/dumper-src
+          cd /tmp/dumper-src
+          cargo build --release
+          DUMPER_BIN=$(find /tmp/dumper-src -name "il2cpp_dumper" -type f | head -n1)
+          if [ -z "$DUMPER_BIN" ]; then
+            echo "::error::dumper binary not found"
+            exit 1
+          fi
+          chmod +x "$DUMPER_BIN"
+          echo "DUMPER_BIN=$DUMPER_BIN" >> $GITHUB_ENV
+          echo "Dumper: $DUMPER_BIN"
+
+      - name: Resolve manifest ID for depot
+        id: manifest
+        run: |
+          APP_ID="${{ steps.targets.outputs.app_id }}"
+          DEPOT_ID="${{ steps.targets.outputs.depot_id }}"
+
+          MANIFEST_ID=$(curl -sf "https://api.steamcmd.net/v1/info/${APP_ID}" \
+            | jq -r ".data.\"${APP_ID}\".depots.\"${DEPOT_ID}\".manifests.public.gid" 2>/dev/null || echo "")
+
+          if [ -z "$MANIFEST_ID" ] || [ "$MANIFEST_ID" = "null" ]; then
+            echo "::warning::Could not resolve manifest; relying on SteamCMD default"
+            MANIFEST_ID=""
+          fi
+          echo "manifest_id=$MANIFEST_ID" >> $GITHUB_OUTPUT
+
+          BUILD_ID=$(curl -sf "https://api.steamcmd.net/v1/info/${APP_ID}" \
+            | jq -r ".data.\"${APP_ID}\".depots.branches.public.buildid" 2>/dev/null || echo "unknown")
+          echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
+
+          CACHED=$(cat .last_buildid 2>/dev/null || echo "0")
+
+          if [ "$BUILD_ID" != "$CACHED" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "Build changed: $CACHED -> $BUILD_ID"
+          elif [ "${{ inputs.force_dump }}" = "true" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "Forced dump"
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "No update. Build ID: $CACHED"
+          fi
+
+      - name: Download Rust client depot
+        if: steps.manifest.outputs.changed == 'true'
+        env:
+          STEAM_USER: ${{ secrets.STEAM_USER }}
+          STEAM_PASS: ${{ secrets.STEAM_PASS }}
+        run: |
+          APP_ID="${{ steps.targets.outputs.app_id }}"
+          DEPOT_ID="${{ steps.targets.outputs.depot_id }}"
+          MANIFEST_ID="${{ steps.manifest.outputs.manifest_id }}"
+
+          if [ -z "$STEAM_USER" ] || [ -z "$STEAM_PASS" ]; then
+            echo "::error::STEAM_USER / STEAM_PASS not configured"
             exit 1
           fi
 
-          SHA=$(sha256sum /tmp/rust.h | awk '{print $1}')
-          echo "source_sha=$SHA" >> $GITHUB_OUTPUT
+          DEPOT_ARGS="$APP_ID $DEPOT_ID"
+          [ -n "$MANIFEST_ID" ] && DEPOT_ARGS="$APP_ID $DEPOT_ID $MANIFEST_ID"
 
-          CACHED=$(cat .last_source_sha 2>/dev/null || echo "0")
+          "$HOME/steamcmd/steamcmd.sh" \
+            +@sSteamCmdForcePlatformType windows \
+            +login "$STEAM_USER" "$STEAM_PASS" \
+            +download_depot $DEPOT_ARGS \
+            +quit
 
-          if [ "$SHA" != "$CACHED" ]; then
-            echo "changed=true" >> $GITHUB_OUTPUT
-          elif [ "${{ inputs.force_dump }}" = "true" ]; then
-            echo "changed=true" >> $GITHUB_OUTPUT
-          else
-            echo "changed=false" >> $GITHUB_OUTPUT
+          STEAM_DEPOT_DIR=$(find "$HOME" -type d -name "depot_${DEPOT_ID}" -print -quit 2>/dev/null || echo "")
+          if [ -z "$STEAM_DEPOT_DIR" ] || [ ! -d "$STEAM_DEPOT_DIR" ]; then
+            echo "::error::depot directory not found"
+            find "$HOME" -type d -name "depot_${DEPOT_ID}" 2>/dev/null || true
+            find "$HOME" -type d -name "content" -path "*steamapps*" 2>/dev/null || true
+            exit 1
           fi
 
-          echo "=== rust.h line count ==="
-          wc -l /tmp/rust.h
+          GAMEASSEMBLY=$(find "$STEAM_DEPOT_DIR" -iname "GameAssembly.dll" -print -quit)
+          METADATA=$(find "$STEAM_DEPOT_DIR" -iname "global-metadata.dat" -print -quit)
+
+          if [ -z "$GAMEASSEMBLY" ]; then
+            echo "::error::GameAssembly.dll not found"
+            find "$STEAM_DEPOT_DIR" -maxdepth 5 -type f -printf '%s\t%p\n' 2>/dev/null | sort -rn | head -30
+            exit 1
+          fi
+          if [ -z "$METADATA" ]; then
+            echo "::error::global-metadata.dat not found"
+            find "$STEAM_DEPOT_DIR" -maxdepth 6 -iname "*.dat" -print 2>/dev/null | head -20
+            exit 1
+          fi
+
+          echo "GAMEASSEMBLY=$GAMEASSEMBLY" >> $GITHUB_ENV
+          echo "METADATA=$METADATA"         >> $GITHUB_ENV
+
+      - name: Run dumper
+        if: steps.manifest.outputs.changed == 'true'
+        run: |
+          mkdir -p /tmp/output
+          # Create config to skip unnecessary output
+          cat > /tmp/dumper-config.json <<'EOF'
+          {
+            "dumpMethod": false,
+            "dumpField": true,
+            "dumpProperty": false,
+            "dumpAttribute": false,
+            "dumpMethodOffset": false,
+            "dumpFieldOffset": true,
+            "dumpTypeDefIndex": true,
+            "dumpAssemblyName": false,
+            "generateStruct": false,
+            "generateDummyDll": false,
+            "generateCppScaffold": false,
+            "requireAnyKey": false,
+            "splitDumpPerType": false
+          }
+          EOF
+
+          cp /tmp/dumper-config.json /tmp/output/config.json
+          "$DUMPER_BIN" "$GAMEASSEMBLY" "$METADATA" /tmp/output || {
+            echo "::error::dumper failed"
+            exit 1
+          }
+
+          echo "=== dump.cs line count ==="
+          wc -l /tmp/output/dump.cs
 
       - name: Parse offsets
-        if: steps.fetch.outputs.changed == 'true'
-        id: parse
+        if: steps.manifest.outputs.changed == 'true'
         run: |
-          python3 scripts/parse_rust_data.py \
-            /tmp/rust.h \
+          OUTPUT_HEADER="${{ steps.targets.outputs.output_header }}"
+          python3 scripts/parse_offsets.py \
+            /tmp/output/dump.cs \
             scripts/mapping.json \
-            "${{ steps.targets.outputs.output_header }}" \
-            > /tmp/parse_report.txt 2>&1 || true
-
-          cat /tmp/parse_report.txt
-
-          if grep -qE '^\[parse\] OK=[0-9]+ ' /tmp/parse_report.txt; then
-            OK=$(grep -oP 'OK=\K[0-9]+' /tmp/parse_report.txt | head -1)
-            if [ "${OK:-0}" = "0" ]; then
-              echo "::error::no offsets resolved"
+            "$OUTPUT_HEADER" || {
+              echo "::error::parser failed"
               exit 1
-            fi
-          fi
+            }
 
-          if grep -q 'MISSING' /tmp/parse_report.txt || grep -q 'DRIFT' /tmp/parse_report.txt; then
-            echo "drift=true" >> $GITHUB_OUTPUT
-          else
-            echo "drift=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Show generated header
-        if: steps.fetch.outputs.changed == 'true'
-        run: |
-          echo "=== offsets.h ==="
-          cat "${{ steps.targets.outputs.output_header }}" || true
-
-      - name: Update source hash
-        if: steps.fetch.outputs.changed == 'true'
-        run: echo "${{ steps.fetch.outputs.source_sha }}" > .last_source_sha
+      - name: Update cached build ID
+        if: steps.manifest.outputs.changed == 'true'
+        run: echo "${{ steps.manifest.outputs.build_id }}" > .last_buildid
 
       - name: Commit and push
-        if: steps.fetch.outputs.changed == 'true'
+        if: steps.manifest.outputs.changed == 'true'
         id: commit
         run: |
-          OUT="${{ steps.targets.outputs.output_header }}"
+          OUTPUT_HEADER="${{ steps.targets.outputs.output_header }}"
           git config user.name  'offsets-bot'
           git config user.email 'offsets-bot@users.noreply.github.com'
-          git add "$OUT" .last_source_sha || true
+          git add "$OUTPUT_HEADER" .last_buildid || true
           if git diff --staged --quiet; then
-            echo "No changes to commit"
             echo "committed=false" >> $GITHUB_OUTPUT
           else
-            git commit -m "Update offsets (source sha ${{ steps.fetch.outputs.source_sha }})"
+            git commit -m "Update offsets (build ${{ steps.manifest.outputs.build_id }})"
             git push
             echo "committed=true" >> $GITHUB_OUTPUT
           fi
 
-      - name: Notify on drift
-        if: steps.fetch.outputs.changed == 'true' && steps.parse.outputs.drift == 'true'
-        env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-        run: |
-          python3 scripts/notify.py \
-            --title "Offset drift detected" \
-            --message "rust.h updated. Some fields moved or went missing. Check the parse report." \
-            --report /tmp/parse_report.txt || true
-
       - name: Notify on success
-        if: steps.fetch.outputs.changed == 'true' && steps.commit.outputs.committed == 'true' && steps.parse.outputs.drift != 'true'
+        if: steps.manifest.outputs.changed == 'true' && steps.commit.outputs.committed == 'true'
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
           python3 scripts/notify.py \
             --title "Offsets updated" \
-            --message "Fresh rust.h parsed. All mapped fields validated." || true
+            --message "Build ${{ steps.manifest.outputs.build_id }} dumped and committed." || true
 
       - name: Notify on failure
         if: failure()
