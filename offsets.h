@@ -4,7 +4,7 @@
 // Auto-generated from Rust-Data rust.h.
 // Do not edit manually.
 
-// Generated: 2026-10-15T12:18:26.461365+00:00
+// Generated: 2026-10-15T12:20:58.975099+00:00
 
 namespace Offsets {
     // ── BasePlayer ──
