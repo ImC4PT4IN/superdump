@@ -46,25 +46,40 @@ jobs:
 
       - name: Free disk space
         run: |
-          # GitHub runners ship with ~30GB of toolchains we don't need.
-          # Rust server depot is ~10GB; default runner has ~14GB free without this.
-          sudo rm -rf \
-            /usr/share/dotnet \
-            /usr/local/lib/android \
-            /opt/ghc \
-            /opt/hostedtoolcache/CodeQL \
-            /usr/local/share/boost \
-            /usr/share/swift \
-            "$AGENT_TOOLSDIRECTORY" || true
+          # Parallel deletes. Each backgrounded, then wait.
+          sudo rm -rf /usr/share/dotnet            &
+          sudo rm -rf /usr/local/lib/android      &
+          sudo rm -rf /opt/ghc                     &
+          sudo rm -rf /usr/local/share/boost      &
+          sudo rm -rf /usr/share/swift            &
+          sudo rm -rf /opt/hostedtoolcache/CodeQL &
+          wait
+
+          # hostedtoolcache has per-tool subtrees. Only the big ones matter.
+          sudo rm -rf /opt/hostedtoolcache/node* &
+          sudo rm -rf /opt/hostedtoolcache/Java* &
+          sudo rm -rf /opt/hostedtoolcache/Ruby* &
+          sudo rm -rf /opt/hostedtoolcache/PyPy* &
+          wait
+
           sudo docker image prune -af || true
           df -h /
 
       - name: Install dependencies
         run: |
-          sudo dpkg --add-architecture i386
-          sudo add-apt-repository -y multiverse
           sudo apt-get update
-          sudo apt-get install -y steamcmd jq python3-pip unzip
+          sudo apt-get install -y jq python3-pip unzip curl
+
+          # SteamCMD via Valve's official tarball. No apt, no i386, no license prompt.
+          mkdir -p "$HOME/steamcmd"
+          curl -sqL "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz" \
+            | tar zxvf - -C "$HOME/steamcmd"
+
+          # Self-update once so subsequent runs use the real client.
+          "$HOME/steamcmd/steamcmd.sh" +quit || true
+
+          echo "$HOME/steamcmd" >> $GITHUB_PATH
+
           pip3 install -r scripts/requirements.txt
 
       - name: Check Steam manifest for update
@@ -101,9 +116,9 @@ jobs:
           APP_ID="${{ steps.targets.outputs.app_id }}"
           mkdir -p /tmp/rust_server
 
-          # Anonymous login — no Steam account needed, no Guard, no secrets.
+          # Anonymous login — no Steam account, no Guard, no secrets.
           # Server depot (258550) ships the same IL2CPP binaries as the client.
-          steamcmd \
+          "$HOME/steamcmd/steamcmd.sh" \
             +force_install_dir /tmp/rust_server \
             +login anonymous \
             +app_update "$APP_ID" validate \
