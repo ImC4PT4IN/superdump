@@ -264,28 +264,65 @@ jobs:
           echo "=== dump.cs line count ==="
           wc -l /tmp/output/dump.cs || true
 
-      - name: Debug class listing
+      - name: Find ESP anchors by structure
         if: steps.manifest.outputs.changed == 'true'
         run: |
           python3 - <<'PYEOF'
           import re
           src = open("/tmp/output/dump.cs", encoding="utf-8", errors="ignore").read()
 
-          classes = re.findall(
-              r"^(?:public |private |internal |protected )?"
-              r"(?:sealed |abstract |static )*"
-              r"(?:class|struct) ([\w.]+)",
-              src, re.M
-          )
-          print(f"Total class-like declarations: {len(classes)}")
-          print()
+          # Split into classes
+          blocks = re.split(r"\n(?=(?:public |private |internal |protected )?(?:sealed |abstract |static )*(?:class|struct) )", src)
 
-          for kw in ["Player", "Network", "Combat", "Entity", "Camera"]:
-              hits = [c for c in classes if kw.lower() in c.lower()]
-              print(f"=== '{kw}' classes ({len(hits)}) ===")
-              for c in sorted(set(hits))[:40]:
-                  print(f"  {c}")
-              print()
+          def show(label, needle, limit=6):
+              print(f"\n=== {label} (searching for: {needle}) ===")
+              count = 0
+              for b in blocks:
+                  if needle not in b:
+                      continue
+                  # header line only
+                  header = b.split("\n", 1)[0]
+                  # show first 15 field lines
+                  field_lines = [l for l in b.split("\n") if re.search(r";\s*//\s*0x", l)][:15]
+                  if not field_lines:
+                      continue
+                  print(f"--- {header}")
+                  for fl in field_lines:
+                      print(f"    {fl.strip()}")
+                  count += 1
+                  if count >= limit:
+                      break
+              if count == 0:
+                  print(f"  (no matches)")
+
+          # 1. Classes with a ListHashSet field — entity list anchor
+          show("ListHashSet users", "ListHashSet<")
+
+          # 2. Classes with a Matrix4x4 field — view matrix anchor
+          show("Matrix4x4 users", "Matrix4x4")
+
+          # 3. Classes with a PlayerModel field — player class anchor
+          show("PlayerModel users", "PlayerModel ")
+
+          # 4. Anything named "Player" as a class
+          print("\n=== Exact class name 'Player' ===")
+          for b in blocks:
+              header = b.split("\n", 1)[0]
+              if re.match(r"^(?:public |private |internal )?(?:sealed |abstract )?class Player\b", header):
+                  print(header)
+                  for l in b.split("\n")[:25]:
+                      if re.search(r";\s*//\s*0x", l):
+                          print(f"    {l.strip()}")
+
+          # 5. Anything named "Networkable"
+          print("\n=== Exact class name 'Networkable' ===")
+          for b in blocks:
+              header = b.split("\n", 1)[0]
+              if re.match(r"^(?:public |private |internal )?(?:sealed |abstract )?class Networkable\b", header):
+                  print(header)
+                  for l in b.split("\n")[:25]:
+                      if re.search(r";\s*//\s*0x", l):
+                          print(f"    {l.strip()}")
           PYEOF
 
       - name: Debug dump format
