@@ -264,27 +264,27 @@ jobs:
           echo "=== dump.cs line count ==="
           wc -l /tmp/output/dump.cs || true
 
-      - name: Debug class bodies
+      - name: Debug class listing
         if: steps.manifest.outputs.changed == 'true'
         run: |
           python3 - <<'PYEOF'
           import re
           src = open("/tmp/output/dump.cs", encoding="utf-8", errors="ignore").read()
-          for cls in ["BasePlayer", "BaseNetworkable", "BaseCombatEntity", "BaseEntity", "PlayerModel", "MainCamera"]:
-              m = re.search(
-                  r"^(?:public |private |internal )?(?:sealed |abstract )?(?:class|struct) "
-                  + cls + r"\b.*?\n\{",
-                  src, re.M
-              )
-              if not m:
-                  print(f"=== {cls}: NOT FOUND ===\n")
-                  continue
-              # Capture body up to matching close at col 0
-              start = m.start()
-              end_m = re.search(r"\n\}", src[m.end():])
-              body = src[start:m.end() + (end_m.start() + 1 if end_m else 2000)]
-              print(f"=================== {cls} ===================")
-              print(body[:3000])
+
+          classes = re.findall(
+              r"^(?:public |private |internal |protected )?"
+              r"(?:sealed |abstract |static )*"
+              r"(?:class|struct) ([\w.]+)",
+              src, re.M
+          )
+          print(f"Total class-like declarations: {len(classes)}")
+          print()
+
+          for kw in ["Player", "Network", "Combat", "Entity", "Camera"]:
+              hits = [c for c in classes if kw.lower() in c.lower()]
+              print(f"=== '{kw}' classes ({len(hits)}) ===")
+              for c in sorted(set(hits))[:40]:
+                  print(f"  {c}")
               print()
           PYEOF
 
