@@ -264,16 +264,12 @@ jobs:
           echo "=== dump.cs line count ==="
           wc -l /tmp/output/dump.cs || true
 
-      - name: Dump fields only
+      - name: Find remaining anchors
         if: steps.manifest.outputs.changed == 'true'
         run: |
           python3 - <<'PYEOF'
           import re
-
           src = open("/tmp/output/dump.cs", encoding="utf-8", errors="ignore").read()
-
-          want = ["Networkable", "Player", "PlayerModel", "MainCamera",
-                  "BasePlayer", "BaseNetworkable", "BaseCombatEntity", "BaseEntity"]
 
           class_re = re.compile(
               r"^((?:public |private |internal |protected )?"
@@ -281,35 +277,57 @@ jobs:
               r"(?:class|struct)\s+([\w.]+)[^\n]*\n\{)",
               re.M
           )
-          field_re = re.compile(
-              r"^\s*(public|private|protected|internal)?\s*"
-              r"(static\s+)?"
-              r"(?:readonly\s+)?"
-              r"([\w<>\[\]\.\,\?%]+)\s+"
-              r"([\w%<>\.]+)\s*"
-              r";\s*//\s*(0x[0-9A-Fa-f]+)"
-          )
 
+          # 1. classes that declare a PlayerModel field — that's the player entity
+          print("=== classes with PlayerModel field ===")
           for m in class_re.finditer(src):
               name = m.group(2)
-              if "." in name or name not in want:
+              if "." in name:
                   continue
               end = src.find("\n}", m.end())
               body = src[m.end():end] if end != -1 else src[m.end():m.end()+8000]
+              if re.search(r"PlayerModel\s+\w+\s*;", body):
+                  fields = re.findall(r"([\w<>\[\]\.]+)\s+(\w+)\s*;\s*//\s*(0x[0-9A-Fa-f]+)", body)
+                  relevant = [f for f in fields if any(k in f[0].lower() for k in
+                              ["player", "vector", "transform", "string", "float", "int", "uint"])]
+                  print(f"\n--- {name} ({len(fields)} fields) ---")
+                  for ft, fn, off in relevant[:40]:
+                      print(f"  [{off}] {ft} {fn}")
 
-              fields = []
-              for line in body.split("\n"):
-                  fm = field_re.match(line)
-                  if fm:
-                      vis, stat, ftype, fname, off = fm.groups()
-                      flags = []
-                      if stat: flags.append("static")
-                      if vis: flags.append(vis.strip())
-                      fields.append(f"  [{off}] {ftype} {fname}  ({' '.join(flags) or 'instance'})")
+          # 2. classes with Networkable / ListHashSet / Dictionary<ulong,...> collection fields
+          print("\n\n=== entity-list candidates ===")
+          for m in class_re.finditer(src):
+              name = m.group(2)
+              if "." in name:
+                  continue
+              end = src.find("\n}", m.end())
+              body = src[m.end():end] if end != -1 else src[m.end():m.end()+8000]
+              hits = re.findall(
+                  r"([\w<>\[\]\.]+(?:Dictionary|HashSet|ListHashSet|List|HashSet)[\w<>\[\]\.\,]*)"
+                  r"\s+(\w+)\s*;\s*//\s*(0x[0-9A-Fa-f]+)",
+                  body
+              )
+              if hits:
+                  print(f"\n--- {name} ---")
+                  for ft, fn, off in hits[:20]:
+                      print(f"  [{off}] {ft} {fn}")
 
-              print(f"\n===== {name} ({len(fields)} fields) =====")
-              for f in fields:
-                  print(f)
+          # 3. camera candidates — classes with a Camera or Matrix4x4 field
+          print("\n\n=== camera candidates ===")
+          for m in class_re.finditer(src):
+              name = m.group(2)
+              if "." in name:
+                  continue
+              end = src.find("\n}", m.end())
+              body = src[m.end():end] if end != -1 else src[m.end():m.end()+8000]
+              hits = re.findall(
+                  r"((?:UnityEngine\.)?(?:Camera|Matrix4x4|Vector3|Quaternion))\s+(\w+)\s*;\s*//\s*(0x[0-9A-Fa-f]+)",
+                  body
+              )
+              if hits and ("Camera" in name or "MainCamera" in name or "RustCamera" in name):
+                  print(f"\n--- {name} ---")
+                  for ft, fn, off in hits[:30]:
+                      print(f"  [{off}] {ft} {fn}")
           PYEOF
 
       - name: Debug dump format
