@@ -16,10 +16,8 @@ import urllib.error
 import urllib.request
 
 # Cloudflare in front of Discord rejects Python's default urllib UA with HTTP 403.
-# Any non-empty, non-default UA string clears it.
 USER_AGENT = "RustOffsetsBot/1.0 (+https://github.com/)"
 
-# Discord caps message content at 2000 chars. Leave headroom for fences + title.
 MAX_REPORT_CHARS = 1400
 MAX_RETRIES = 3
 RETRY_BACKOFF = 2.0
@@ -36,10 +34,6 @@ def read_report(path: str) -> str:
 
 
 def _post_json(url: str, payload: dict, timeout: int = 10) -> bool:
-    """
-    POST a JSON payload with a proper User-Agent. Retries on 429 (rate limit)
-    and 5xx. Returns True on success, False otherwise. Never raises.
-    """
     body = json.dumps(payload).encode("utf-8")
 
     for attempt in range(1, MAX_RETRIES + 1):
@@ -61,7 +55,6 @@ def _post_json(url: str, payload: dict, timeout: int = 10) -> bool:
                 return False
 
         except urllib.error.HTTPError as e:
-            # 429 = rate limited. Honour Retry-After if present.
             if e.code == 429:
                 retry_after = e.headers.get("Retry-After")
                 try:
@@ -72,7 +65,6 @@ def _post_json(url: str, payload: dict, timeout: int = 10) -> bool:
                 if attempt < MAX_RETRIES:
                     time.sleep(wait)
                     continue
-                print("[notify] giving up after 429", file=sys.stderr)
                 return False
 
             if 500 <= e.code < 600 and attempt < MAX_RETRIES:
@@ -120,11 +112,7 @@ def main():
     parser.add_argument("--title", required=True)
     parser.add_argument("--message", required=True)
     parser.add_argument("--report", default="")
-    parser.add_argument(
-        "--strict",
-        action="store_true",
-        help="Exit non-zero if any configured webhook fails. Default: always exit 0.",
-    )
+    parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()
 
     report = read_report(args.report)
@@ -133,7 +121,6 @@ def main():
     generic = os.environ.get("GENERIC_WEBHOOK", "").strip()
 
     if not discord and not generic:
-        # Nothing configured — print and succeed.
         print(f"[notify] {args.title}")
         print(f"[notify] {args.message}")
         if report:
