@@ -190,9 +190,9 @@ jobs:
         run: |
           VERSION="${{ steps.targets.outputs.dumper_version }}"
 
-          # MlgmXyysd standalone provides Linux x64 binaries.
-          # Asset naming: Il2CppDumper-<version>-linux-x64.zip
-          URL="https://github.com/MlgmXyysd/Il2CppDumper-Standalone/releases/download/v${VERSION}-standalone/Il2CppDumper-${VERSION}-linux-x64.zip"
+          # MlgmXyysd standalone. Actual asset naming:
+          #   Il2CppDumper-linux-v<VERSION>.zip
+          URL="https://github.com/MlgmXyysd/Il2CppDumper-Standalone/releases/download/v${VERSION}-standalone/Il2CppDumper-linux-v${VERSION}.zip"
 
           echo "Trying: $URL"
           if ! curl -sfL "$URL" -o /tmp/il2cpp.zip; then
