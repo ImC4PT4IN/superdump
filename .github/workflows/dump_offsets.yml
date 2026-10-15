@@ -80,33 +80,29 @@ jobs:
       - name: Dump rust.h contents
         if: steps.fetch.outputs.changed == 'true'
         run: |
-          echo "=== all namespaces in rust.h ==="
-          grep -oP '^\s*namespace\s+\K\w+' /tmp/rust.h | sort -u
+          python3 - <<'PYEOF'
+          import re
+          src = open("/tmp/rust.h").read()
+          ns_re = re.compile(r"^\s*namespace\s+(\w+)", re.M)
+          field_re = re.compile(
+              r"inline\s+constexpr\s+::std::ptrdiff_t\s+(\w+)\s*=\s*(0x[0-9A-Fa-f]+)\s*;\s*(?://\s*(.*))?$"
+          )
 
-          echo ""
-          echo "=== fields in BasePlayer ==="
-          awk '/^\s*namespace BasePlayer\b/,/^}/' /tmp/rust.h
-
-          echo ""
-          echo "=== fields in any class containing Player ==="
-          for ns in $(grep -oP '^\s*namespace\s+\K\w*Player\w*' /tmp/rust.h | sort -u); do
-            echo "--- $ns ---"
-            awk "/^\\s*namespace $ns\\b/,/^}/" /tmp/rust.h | head -60
-          done
-
-          echo ""
-          echo "=== fields in any class containing Camera ==="
-          for ns in $(grep -oP '^\s*namespace\s+\K\w*Camera\w*' /tmp/rust.h | sort -u); do
-            echo "--- $ns ---"
-            awk "/^\\s*namespace $ns\\b/,/^}/" /tmp/rust.h | head -40
-          done
-
-          echo ""
-          echo "=== fields in any class containing Network or Entity ==="
-          for ns in $(grep -oP '^\s*namespace\s+\K\w*(Network|Entity)\w*' /tmp/rust.h | sort -u); do
-            echo "--- $ns ---"
-            awk "/^\\s*namespace $ns\\b/,/^}/" /tmp/rust.h | head -30
-          done
+          # split by namespace
+          blocks = re.split(r"(?=^\s*namespace\s+\w+)", src, flags=re.M)
+          for b in blocks:
+              nm = ns_re.match(b)
+              if not nm:
+                  continue
+              name = nm.group(1)
+              fields = field_re.findall(b)
+              if not fields:
+                  continue
+              print(f"===== {name} ({len(fields)} fields) =====")
+              for fname, off, comment in fields:
+                  print(f"  [{off}] {fname}    // {comment}")
+              print()
+          PYEOF
 
       - name: Parse offsets
         if: steps.fetch.outputs.changed == 'true'
