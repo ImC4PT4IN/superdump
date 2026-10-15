@@ -98,23 +98,23 @@ jobs:
           # DummyAssemblyGenerator.CreateGenericParameter. We only need dump.cs,
           # so skip the export entirely — no crash possible regardless of config.
           python3 - <<'PYEOF'
-import re
-p = "/tmp/il2cpp-src/Il2CppDumper/Program.cs"
-src = open(p).read()
-# Find the call to DummyAssemblyExporter.Export and guard it with a config check.
-src = re.sub(
-    r'DummyAssemblyExporter\.Export\(([^;]+)\);',
-    r'if (config.GenerateDummyDll) DummyAssemblyExporter.Export(\1);',
-    src
-)
-# Also force the default to false if the config is missing or unreadable.
-src = src.replace(
-    'config = JsonSerializer.Deserialize(File.ReadAllText(AppDomain.CurrentDomain.BaseDirectory + @"config.json"));',
-    'try { config = JsonSerializer.Deserialize(File.ReadAllText(AppDomain.CurrentDomain.BaseDirectory + @"config.json")); } catch { config = new Config(); } config.GenerateDummyDll = false; config.RequireAnyKey = false;'
-)
-open(p, "w").write(src)
-print("Program.cs patched")
-PYEOF
+          import re
+          p = "/tmp/il2cpp-src/Il2CppDumper/Program.cs"
+          src = open(p).read()
+          # Find the call to DummyAssemblyExporter.Export and guard it with a config check.
+          src = re.sub(
+              r'DummyAssemblyExporter\.Export\(([^;]+)\);',
+              r'if (config.GenerateDummyDll) DummyAssemblyExporter.Export(\1);',
+              src
+          )
+          # Also force the default to false if the config is missing or unreadable.
+          src = src.replace(
+              'config = JsonSerializer.Deserialize(File.ReadAllText(AppDomain.CurrentDomain.BaseDirectory + @"config.json"));',
+              'try { config = JsonSerializer.Deserialize(File.ReadAllText(AppDomain.CurrentDomain.BaseDirectory + @"config.json")); } catch { config = new Config(); } config.GenerateDummyDll = false; config.RequireAnyKey = false;'
+          )
+          open(p, "w").write(src)
+          print("Program.cs patched")
+          PYEOF
 
           # Pin net8.0 to avoid the multi-target race on Il2CppDumper.deps.json.
           "$HOME/.dotnet/dotnet" build \
