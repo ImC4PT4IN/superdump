@@ -6,14 +6,14 @@ on:
   workflow_dispatch:
     inputs:
       force_dump:
-        description: 'Force a dump even if build ID is unchanged'
+        description: 'Force a fetch even if the source hash is unchanged'
         type: boolean
         default: false
 
 jobs:
   dump:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 15
     permissions:
       contents: write
       issues: write
@@ -28,335 +28,112 @@ jobs:
       - name: Read targets.json
         id: targets
         run: |
-          APP_ID=$(jq -r '.app_id' targets.json)
-          DEPOT_ID=$(jq -r '.depot_id' targets.json)
-          OUTPUT_HEADER=$(jq -r '.output_header // "offsets.h"' targets.json)
+          OUT=$(jq -r '.output_header // "offsets.h"' targets.json)
+          URL=$(jq -r '.rust_data_url' targets.json)
 
-          for v in APP_ID DEPOT_ID OUTPUT_HEADER; do
+          for v in OUT URL; do
             if [ -z "${!v}" ] || [ "${!v}" = "null" ]; then
-              echo "::error::$v missing from targets.json"
+              echo "::error::missing config in targets.json"
               exit 1
             fi
           done
 
-          echo "app_id=$APP_ID"               >> $GITHUB_OUTPUT
-          echo "depot_id=$DEPOT_ID"           >> $GITHUB_OUTPUT
-          echo "output_header=$OUTPUT_HEADER" >> $GITHUB_OUTPUT
-
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet            &
-          sudo rm -rf /usr/local/lib/android      &
-          sudo rm -rf /opt/ghc                     &
-          sudo rm -rf /usr/local/share/boost      &
-          sudo rm -rf /usr/share/swift            &
-          sudo rm -rf /opt/hostedtoolcache/CodeQL &
-          wait
-
-          sudo rm -rf /opt/hostedtoolcache/node* &
-          sudo rm -rf /opt/hostedtoolcache/Java* &
-          sudo rm -rf /opt/hostedtoolcache/Ruby* &
-          sudo rm -rf /opt/hostedtoolcache/PyPy* &
-          wait
-
-          sudo docker image prune -af || true
-          df -h /
+          echo "output_header=$OUT"    >> $GITHUB_OUTPUT
+          echo "rust_data_url=$URL"    >> $GITHUB_OUTPUT
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq python3-pip unzip curl
+          sudo apt-get install -y jq python3-pip
+          pip3 install -r scripts/requirements.txt 2>/dev/null || true
 
-          mkdir -p "$HOME/steamcmd"
-          curl -sqL "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz" \
-            | tar zxvf - -C "$HOME/steamcmd"
-
-          "$HOME/steamcmd/steamcmd.sh" +quit || true
-          echo "$HOME/steamcmd" >> $GITHUB_PATH
-
-          pip3 install -r scripts/requirements.txt
-
-      - name: Install .NET SDK
+      - name: Fetch rust.h
+        id: fetch
         run: |
-          curl -sSL https://dot.net/v1/dotnet-install.sh \
-            | bash /dev/stdin --channel 8.0
-          echo "$HOME/.dotnet" >> $GITHUB_PATH
-          "$HOME/.dotnet/dotnet" --version
+          URL="${{ steps.targets.outputs.rust_data_url }}"
+          curl -sfL "$URL" -o /tmp/rust.h
 
-      - name: Build lxraa Il2CppDumper (v39 fork, DummyDll patched)
-        run: |
-          git clone --depth 1 \
-            https://github.com/lxraa/Il2CppDumper.git /tmp/il2cpp-src
-
-          cd /tmp/il2cpp-src
-
-          python3 - <<'PYEOF'
-          import re
-          p = "/tmp/il2cpp-src/Il2CppDumper/Program.cs"
-          src = open(p).read()
-          src = re.sub(
-              r'DummyAssemblyExporter\.Export\(([^;]+)\);',
-              r'if (config.GenerateDummyDll) DummyAssemblyExporter.Export(\1);',
-              src
-          )
-          src = src.replace(
-              'config = JsonSerializer.Deserialize(File.ReadAllText(AppDomain.CurrentDomain.BaseDirectory + @"config.json"));',
-              'try { config = JsonSerializer.Deserialize(File.ReadAllText(AppDomain.CurrentDomain.BaseDirectory + @"config.json")); } catch { config = new Config(); } config.GenerateDummyDll = false; config.RequireAnyKey = false;'
-          )
-          open(p, "w").write(src)
-          print("Program.cs patched")
-          PYEOF
-
-          "$HOME/.dotnet/dotnet" build \
-            -c Release \
-            -f net8.0 \
-            -o /tmp/il2cpp-build \
-            Il2CppDumper/Il2CppDumper.csproj
-
-          DUMPER_DLL=$(find /tmp/il2cpp-build -name "Il2CppDumper.dll" -print -quit)
-          if [ -z "$DUMPER_DLL" ]; then
-            echo "::error::Il2CppDumper.dll not found after build"
-            find /tmp/il2cpp-build -type f | head -40
+          if [ ! -s /tmp/rust.h ]; then
+            echo "::error::empty rust.h"
             exit 1
           fi
 
-          cat > /tmp/il2cpp-build/config.json <<'EOF'
-          {
-            "DumpMethod": true,
-            "DumpField": true,
-            "DumpProperty": true,
-            "DumpAttribute": false,
-            "DumpFieldOffset": true,
-            "DumpMethodOffset": true,
-            "DumpTypeDefIndex": true,
-            "GenerateDummyDll": false,
-            "GenerateScript": true,
-            "DummyDllAddToken": false,
-            "RequireAnyKey": false,
-            "ForceIl2CppVersion": false,
-            "ForceVersion": 24,
-            "ForceDump": true,
-            "NoRedirectedPointer": false
-          }
-          EOF
+          SHA=$(sha256sum /tmp/rust.h | awk '{print $1}')
+          echo "source_sha=$SHA" >> $GITHUB_OUTPUT
 
-          echo "Dumper DLL: $DUMPER_DLL"
-          echo "DUMPER_DLL=$DUMPER_DLL" >> $GITHUB_ENV
+          CACHED=$(cat .last_source_sha 2>/dev/null || echo "0")
+          echo "cached_sha=$CACHED" >> $GITHUB_OUTPUT
 
-      - name: Resolve manifest ID for depot
-        id: manifest
-        run: |
-          APP_ID="${{ steps.targets.outputs.app_id }}"
-          DEPOT_ID="${{ steps.targets.outputs.depot_id }}"
-
-          MANIFEST_ID=$(curl -sf "https://api.steamcmd.net/v1/info/${APP_ID}" \
-            | jq -r ".data.\"${APP_ID}\".depots.\"${DEPOT_ID}\".manifests.public.gid" 2>/dev/null || echo "")
-
-          if [ -z "$MANIFEST_ID" ] || [ "$MANIFEST_ID" = "null" ]; then
-            echo "::warning::Could not resolve manifest for depot ${DEPOT_ID}; relying on SteamCMD default"
-            MANIFEST_ID=""
-          else
-            echo "Resolved manifest: $MANIFEST_ID"
-          fi
-
-          echo "manifest_id=$MANIFEST_ID" >> $GITHUB_OUTPUT
-
-          BUILD_ID=$(curl -sf "https://api.steamcmd.net/v1/info/${APP_ID}" \
-            | jq -r ".data.\"${APP_ID}\".depots.branches.public.buildid" 2>/dev/null || echo "unknown")
-          echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
-
-          CACHED=$(cat .last_buildid 2>/dev/null || echo "0")
-
-          if [ "$BUILD_ID" != "$CACHED" ]; then
+          if [ "$SHA" != "$CACHED" ]; then
             echo "changed=true" >> $GITHUB_OUTPUT
-            echo "Build changed: $CACHED -> $BUILD_ID"
           elif [ "${{ inputs.force_dump }}" = "true" ]; then
             echo "changed=true" >> $GITHUB_OUTPUT
-            echo "Forced dump (build unchanged)"
           else
             echo "changed=false" >> $GITHUB_OUTPUT
-            echo "No update. Build ID: $CACHED"
           fi
 
-      - name: Download Rust client depot
-        if: steps.manifest.outputs.changed == 'true'
-        env:
-          STEAM_USER: ${{ secrets.STEAM_USER }}
-          STEAM_PASS: ${{ secrets.STEAM_PASS }}
-        run: |
-          APP_ID="${{ steps.targets.outputs.app_id }}"
-          DEPOT_ID="${{ steps.targets.outputs.depot_id }}"
-          MANIFEST_ID="${{ steps.manifest.outputs.manifest_id }}"
-
-          if [ -z "$STEAM_USER" ] || [ -z "$STEAM_PASS" ]; then
-            echo "::error::STEAM_USER / STEAM_PASS not configured"
-            exit 1
-          fi
-
-          DEPOT_ARGS="$APP_ID $DEPOT_ID"
-          if [ -n "$MANIFEST_ID" ]; then
-            DEPOT_ARGS="$APP_ID $DEPOT_ID $MANIFEST_ID"
-          fi
-
-          "$HOME/steamcmd/steamcmd.sh" \
-            +@sSteamCmdForcePlatformType windows \
-            +login "$STEAM_USER" "$STEAM_PASS" \
-            +download_depot $DEPOT_ARGS \
-            +quit
-
-          STEAM_DEPOT_DIR=$(find "$HOME" -type d -name "depot_${DEPOT_ID}" -print -quit 2>/dev/null || echo "")
-
-          if [ -z "$STEAM_DEPOT_DIR" ] || [ ! -d "$STEAM_DEPOT_DIR" ]; then
-            echo "::error::depot directory not found after download"
-            find "$HOME" -type d -name "depot_${DEPOT_ID}" 2>/dev/null || true
-            find "$HOME" -type d -name "content" -path "*steamapps*" 2>/dev/null || true
-            ls -la "$HOME" | head -40
-            exit 1
-          fi
-
-          echo "=== depot dir: $STEAM_DEPOT_DIR ==="
-          ls -la "$STEAM_DEPOT_DIR" | head -40
-          du -sh "$STEAM_DEPOT_DIR" 2>/dev/null || true
-
-          GAMEASSEMBLY=$(find "$STEAM_DEPOT_DIR" -iname "GameAssembly.dll" -print -quit)
-          METADATA=$(find "$STEAM_DEPOT_DIR" -iname "global-metadata.dat" -print -quit)
-
-          if [ -z "$GAMEASSEMBLY" ]; then
-            echo "::error::GameAssembly.dll not found in depot"
-            find "$STEAM_DEPOT_DIR" -maxdepth 5 -type f -printf '%s\t%p\n' 2>/dev/null | sort -rn | head -30
-            exit 1
-          fi
-          if [ -z "$METADATA" ]; then
-            echo "::error::global-metadata.dat not found in depot"
-            find "$STEAM_DEPOT_DIR" -maxdepth 6 -iname "*.dat" -print 2>/dev/null | head -20
-            exit 1
-          fi
-
-          echo "GameAssembly: $GAMEASSEMBLY"
-          echo "Metadata:     $METADATA"
-          echo "GAMEASSEMBLY=$GAMEASSEMBLY" >> $GITHUB_ENV
-          echo "METADATA=$METADATA"         >> $GITHUB_ENV
-
-      - name: Run IL2CPP Dumper
-        if: steps.manifest.outputs.changed == 'true'
-        run: |
-          mkdir -p /tmp/output
-          cd /tmp/output
-
-          "$HOME/.dotnet/dotnet" "$DUMPER_DLL" "$GAMEASSEMBLY" "$METADATA" /tmp/output || {
-            echo "::error::IL2CPP Dumper failed"
-            exit 1
-          }
-
-          echo "=== Dumper output ==="
-          ls -la /tmp/output/
-          echo "=== dump.cs line count ==="
-          wc -l /tmp/output/dump.cs || true
-
-      - name: Search for ESP anchors
-        if: steps.manifest.outputs.changed == 'true'
-        run: |
-          python3 - <<'PYEOF'
-          import re
-          src = open("/tmp/output/dump.cs", encoding="utf-8", errors="ignore").read()
-
-          class_re = re.compile(
-              r"^((?:public |private |internal |protected )?"
-              r"(?:sealed |abstract |static )*"
-              r"(?:class|struct)\s+([\w.]+)[^\n]*\n\{)",
-              re.M
-          )
-
-          print("=== searching for ESP anchors ===\n")
-
-          # 1. every class that has a PlayerModel typed field — player entity candidate
-          print("--- classes with PlayerModel field ---")
-          for m in class_re.finditer(src):
-              name = m.group(2)
-              if "." in name:
-                  continue
-              end = src.find("\n}", m.end())
-              body = src[m.end():end] if end != -1 else src[m.end():m.end()+8000]
-              if re.search(r"\bPlayerModel\s+\w+\s*;", body):
-                  fields = re.findall(r"([\w<>\[\]\.]+)\s+(\w+)\s*;\s*//\s*(0x[0-9A-Fa-f]+)", body)
-                  print(f"\n[PLAYER CANDIDATE] {name}  ({len(fields)} fields)")
-                  for ft, fn, off in fields[:60]:
-                      print(f"  [{off}] {ft} {fn}")
-
-          # 2. any class with ListHashSet / HashSet / Dictionary holding Networkable/BaseEntity
-          print("\n\n--- entity-list candidates (collections of entities) ---")
-          for m in class_re.finditer(src):
-              name = m.group(2)
-              if "." in name:
-                  continue
-              end = src.find("\n}", m.end())
-              body = src[m.end():end] if end != -1 else src[m.end():m.end()+8000]
-              for ft, fn, off in re.findall(
-                  r"([\w<>\[\]\.\,]+(?:ListHashSet|HashSet|Dictionary|List)\s*<[^;]+?>)\s+(\w+)\s*;\s*//\s*(0x[0-9A-Fa-f]+)",
-                  body
-              ):
-                  if re.search(r"(Networkable|Entity|BasePlayer|Player)", ft):
-                      print(f"  {name}  [{off}] {ft} {fn}")
-
-          # 3. camera-ish classes with Matrix4x4 or Camera field
-          print("\n\n--- camera/matrix fields ---")
-          for m in class_re.finditer(src):
-              name = m.group(2)
-              if "." in name:
-                  continue
-              if not any(k in name for k in ["Camera", "Player", "Main"]):
-                  continue
-              end = src.find("\n}", m.end())
-              body = src[m.end():end] if end != -1 else src[m.end():m.end()+8000]
-              for ft, fn, off in re.findall(
-                  r"((?:UnityEngine\.)?(?:Camera|Matrix4x4|Vector3|Quaternion))\s+(\w+)\s*;\s*//\s*(0x[0-9A-Fa-f]+)",
-                  body
-              ):
-                  print(f"  {name}  [{off}] {ft} {fn}")
-
-          # 4. exact names, case-insensitive — do they exist at all
-          print("\n\n--- direct class name matches ---")
-          for needle in ["BasePlayer", "Player", "BaseNetworkable", "BaseEntity",
-                         "BaseCombatEntity", "Networkable", "LocalPlayer", "ClientEntity"]:
-              hits = []
-              for m in class_re.finditer(src):
-                  name = m.group(2)
-                  if "." in name:
-                      continue
-                  if name == needle:
-                      # count fields
-                      end = src.find("\n}", m.end())
-                      body = src[m.end():end] if end != -1 else src[m.end():m.end()+8000]
-                      fc = len(re.findall(r";\s*//\s*0x", body))
-                      hits.append(f"{name} ({fc} fields)")
-              print(f"  {needle:20s} -> {', '.join(hits) if hits else 'NOT FOUND'}")
-          PYEOF
+          echo "=== rust.h line count ==="
+          wc -l /tmp/rust.h
+          echo "=== first 30 lines ==="
+          head -30 /tmp/rust.h
 
       - name: Parse offsets
-        if: steps.manifest.outputs.changed == 'true'
+        if: steps.fetch.outputs.changed == 'true'
         run: |
-          OUTPUT_HEADER="${{ steps.targets.outputs.output_header }}"
-          python3 scripts/parse_offsets.py \
-            /tmp/output/dump.cs \
+          python3 scripts/parse_rust_data.py \
+            /tmp/rust.h \
             targets.json \
-            "$OUTPUT_HEADER" || true
+            "${{ steps.targets.outputs.output_header }}"
 
       - name: Validate offsets
-        if: steps.manifest.outputs.changed == 'true'
+        if: steps.fetch.outputs.changed == 'true'
         id: validate
         run: |
-          OUTPUT_HEADER="${{ steps.targets.outputs.output_header }}"
           python3 scripts/validate_offsets.py \
-            /tmp/output/dump.cs \
+            /tmp/rust.h \
             targets.json \
-            "$OUTPUT_HEADER" > /tmp/validation_report.txt 2>&1 || true
-          cat /tmp/validation_report.txt
-          echo "validation_failed=false" >> $GITHUB_OUTPUT
+            "${{ steps.targets.outputs.output_header }}" > /tmp/report.txt 2>&1 || true
+          cat /tmp/report.txt
+          if grep -qiE "missing|not found" /tmp/report.txt; then
+            echo "validation_failed=true" >> $GITHUB_OUTPUT
+          else
+            echo "validation_failed=false" >> $GITHUB_OUTPUT
+          fi
 
-      - name: Upload dump.cs artifact
-        if: steps.manifest.outputs.changed == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: dump-cs
-          path: /tmp/output/dump.cs
-          retention-days: 7
+      - name: Update source hash
+        if: steps.fetch.outputs.changed == 'true'
+        run: echo "${{ steps.fetch.outputs.source_sha }}" > .last_source_sha
+
+      - name: Commit and push
+        if: steps.fetch.outputs.changed == 'true'
+        id: commit
+        run: |
+          OUT="${{ steps.targets.outputs.output_header }}"
+          git config user.name  'offsets-bot'
+          git config user.email 'offsets-bot@users.noreply.github.com'
+          git add "$OUT" .last_source_sha || true
+          if git diff --staged --quiet; then
+            echo "committed=false" >> $GITHUB_OUTPUT
+          else
+            git commit -m "Update offsets (source sha ${{ steps.fetch.outputs.source_sha }})"
+            git push
+            echo "committed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Notify on success
+        if: steps.fetch.outputs.changed == 'true' && steps.commit.outputs.committed == 'true'
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          python3 scripts/notify.py \
+            --title "Offsets updated" \
+            --message "Rust-Data rust.h fetched. Validation: ${{ steps.validate.outputs.validation_failed }}"
+
+      - name: Notify on failure
+        if: failure()
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          python3 scripts/notify.py \
+            --title "Offset pipeline failed" \
+            --message "Workflow failed. Check logs."
