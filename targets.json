@@ -1,7 +1,7 @@
 {
-  "app_id": "258550",
-  "il2cpp_dumper_version": "6.7.46-lxraa.1",
+  "app_id": "252490",
   "output_header": "offsets.h",
+  "il2cpp_dumper_version": "6.7.46-lxraa.1",
   "classes": {
     "BaseNetworkable": {
       "fields": ["clientEntities"],
