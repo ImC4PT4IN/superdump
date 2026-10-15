@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       force_check:
-        description: 'Force a check even if the hash is unchanged'
+        description: 'Force a check even if the build ID is unchanged'
         type: boolean
         default: false
 
@@ -29,19 +29,24 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /usr/share/swift /opt/hostedtoolcache/CodeQL &
           wait
+          sudo rm -rf /opt/hostedtoolcache/node* /opt/hostedtoolcache/Java* /opt/hostedtoolcache/Ruby* /opt/hostedtoolcache/PyPy* &
+          wait
           sudo docker image prune -af || true
           df -h /
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq curl
+          sudo apt-get install -y jq curl python3-pip
+          pip3 install -r scripts/requirements.txt 2>/dev/null || true
+
           mkdir -p "$HOME/steamcmd"
           curl -sqL "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz" \
             | tar zxvf - -C "$HOME/steamcmd"
           "$HOME/steamcmd/steamcmd.sh" +quit || true
+          echo "$HOME/steamcmd" >> $GITHUB_PATH
 
-      - name: Resolve manifest
+      - name: Resolve manifest and build ID
         id: manifest
         run: |
           APP_ID=252490
@@ -57,18 +62,23 @@ jobs:
 
           CACHED=$(cat .last_buildid 2>/dev/null || echo "0")
 
+          echo "Current build: $BUILD_ID"
+          echo "Cached build:  $CACHED"
+
           if [ "$BUILD_ID" != "$CACHED" ]; then
             echo "changed=true" >> $GITHUB_OUTPUT
+            echo "Build changed: $CACHED -> $BUILD_ID"
           elif [ "${{ inputs.force_check }}" = "true" ]; then
             echo "changed=true" >> $GITHUB_OUTPUT
+            echo "Forced check"
           else
             echo "changed=false" >> $GITHUB_OUTPUT
+            echo "No update"
           fi
 
-          echo "Current build: $BUILD_ID (cached: $CACHED)"
-
-      - name: Download latest GameAssembly
+      - name: Download GameAssembly.dll
         if: steps.manifest.outputs.changed == 'true'
+        id: download
         env:
           STEAM_USER: ${{ secrets.STEAM_USER }}
           STEAM_PASS: ${{ secrets.STEAM_PASS }}
@@ -89,14 +99,17 @@ jobs:
             +quit
 
           DEPOT_DIR=$(find "$HOME" -type d -name "depot_252495" -print -quit 2>/dev/null || echo "")
-          if [ -z "$DEPOT_DIR" ]; then
+          if [ -z "$DEPOT_DIR" ] || [ ! -d "$DEPOT_DIR" ]; then
             echo "::error::depot not found"
+            find "$HOME" -type d -name "depot_252495" 2>/dev/null || true
+            find "$HOME" -type d -name "content" -path "*steamapps*" 2>/dev/null || true
             exit 1
           fi
 
           GA="$DEPOT_DIR/GameAssembly.dll"
           if [ ! -f "$GA" ]; then
-            echo "::error::GameAssembly.dll not found"
+            echo "::error::GameAssembly.dll not found in depot"
+            ls -la "$DEPOT_DIR"
             exit 1
           fi
 
@@ -113,33 +126,33 @@ jobs:
             echo "binary_changed=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Save new build ID and hash
+      - name: Save state files
         if: steps.manifest.outputs.changed == 'true'
         run: |
           echo "${{ steps.manifest.outputs.build_id }}" > .last_buildid
-          echo "${{ steps.download.outputs.gameassembly_sha }}" > .last_gameassembly_sha || true
+          echo "${{ steps.download.outputs.gameassembly_sha }}" > .last_gameassembly_sha
 
-      - name: Commit state files
+      - name: Commit state
         if: steps.manifest.outputs.changed == 'true'
         run: |
           git config user.name 'offsets-watcher'
           git config user.email 'offsets-watcher@users.noreply.github.com'
-          git add .last_buildid .last_gameassembly_sha 2>/dev/null || git add .last_buildid || true
+          git add .last_buildid .last_gameassembly_sha
           if git diff --staged --quiet; then
-            echo "No changes"
+            echo "No changes to commit"
           else
             git commit -m "Rust build ${{ steps.manifest.outputs.build_id }}"
             git push
           fi
 
       - name: Notify on update
-        if: steps.manifest.outputs.changed == 'true'
+        if: steps.manifest.outputs.changed == 'true' && steps.download.outputs.binary_changed == 'true'
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
           python3 scripts/notify.py \
-            --title "Rust updated" \
-            --message "Build ${{ steps.manifest.outputs.build_id }}. New GameAssembly SHA. Check if offsets.h needs updating." || true
+            --title "Rust updated — offsets may need refresh" \
+            --message "Build ${{ steps.manifest.outputs.build_id }}. New GameAssembly SHA. Verify offsets.h." || true
 
       - name: Notify on failure
         if: failure()
