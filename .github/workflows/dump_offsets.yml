@@ -1,321 +1,42 @@
-name: Dump Rust Offsets
-
-on:
-  schedule:
-    - cron: '0 */6 * * *'
-  workflow_dispatch:
-    inputs:
-      force_dump:
-        description: 'Force a dump even if build ID is unchanged'
-        type: boolean
-        default: false
-
-jobs:
-  dump:
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    permissions:
-      contents: write
-      issues: write
-
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 1
-
-      - name: Read targets.json
-        id: targets
-        run: |
-          APP_ID=$(jq -r '.app_id' targets.json)
-          DEPOT_ID=$(jq -r '.depot_id' targets.json)
-          DUMPER_VERSION=$(jq -r '.il2cpp_dumper_version' targets.json)
-          OUTPUT_HEADER=$(jq -r '.output_header // "offsets.h"' targets.json)
-
-          for v in APP_ID DEPOT_ID DUMPER_VERSION OUTPUT_HEADER; do
-            if [ -z "${!v}" ] || [ "${!v}" = "null" ]; then
-              echo "::error::$v missing from targets.json"
-              exit 1
-            fi
-          done
-
-          echo "app_id=$APP_ID"                 >> $GITHUB_OUTPUT
-          echo "depot_id=$DEPOT_ID"             >> $GITHUB_OUTPUT
-          echo "dumper_version=$DUMPER_VERSION" >> $GITHUB_OUTPUT
-          echo "output_header=$OUTPUT_HEADER"   >> $GITHUB_OUTPUT
-
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet            &
-          sudo rm -rf /usr/local/lib/android      &
-          sudo rm -rf /opt/ghc                     &
-          sudo rm -rf /usr/local/share/boost      &
-          sudo rm -rf /usr/share/swift            &
-          sudo rm -rf /opt/hostedtoolcache/CodeQL &
-          wait
-
-          sudo rm -rf /opt/hostedtoolcache/node* &
-          sudo rm -rf /opt/hostedtoolcache/Java* &
-          sudo rm -rf /opt/hostedtoolcache/Ruby* &
-          sudo rm -rf /opt/hostedtoolcache/PyPy* &
-          wait
-
-          sudo docker image prune -af || true
-          df -h /
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq python3-pip unzip curl
-
-          mkdir -p "$HOME/steamcmd"
-          curl -sqL "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz" \
-            | tar zxvf - -C "$HOME/steamcmd"
-
-          "$HOME/steamcmd/steamcmd.sh" +quit || true
-          echo "$HOME/steamcmd" >> $GITHUB_PATH
-
-          pip3 install -r scripts/requirements.txt
-
-      - name: Resolve manifest ID for depot
-        id: manifest
-        run: |
-          APP_ID="${{ steps.targets.outputs.app_id }}"
-          DEPOT_ID="${{ steps.targets.outputs.depot_id }}"
-
-          # Fetch the current public manifest ID for the specific depot.
-          # SteamDB's API exposes depot-level manifest IDs via the app info endpoint.
-          MANIFEST_ID=$(curl -sf "https://api.steamcmd.net/v1/info/${APP_ID}" \
-            | jq -r ".data.\"${APP_ID}\".depots.\"${DEPOT_ID}\".manifests.public.gid" 2>/dev/null || echo "")
-
-          if [ -z "$MANIFEST_ID" ] || [ "$MANIFEST_ID" = "null" ]; then
-            echo "::error::Could not resolve manifest ID for depot ${DEPOT_ID}"
-            echo "=== Available depots in appinfo ==="
-            curl -sf "https://api.steamcmd.net/v1/info/${APP_ID}" \
-              | jq -r ".data.\"${APP_ID}\".depots | keys[]" 2>/dev/null | head -20
-            exit 1
-          fi
-
-          echo "Resolved manifest: $MANIFEST_ID"
-          echo "manifest_id=$MANIFEST_ID" >> $GITHUB_OUTPUT
-
-          # Also grab the build ID for cache comparison.
-          BUILD_ID=$(curl -sf "https://api.steamcmd.net/v1/info/${APP_ID}" \
-            | jq -r ".data.\"${APP_ID}\".depots.branches.public.buildid" 2>/dev/null || echo "unknown")
-          echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
-
-          CACHED=$(cat .last_buildid 2>/dev/null || echo "0")
-
-          if [ "$BUILD_ID" != "$CACHED" ]; then
-            echo "changed=true" >> $GITHUB_OUTPUT
-            echo "Build changed: $CACHED -> $BUILD_ID"
-          elif [ "${{ inputs.force_dump }}" = "true" ]; then
-            echo "changed=true" >> $GITHUB_OUTPUT
-            echo "Forced dump (build unchanged)"
-          else
-            echo "changed=false" >> $GITHUB_OUTPUT
-            echo "No update. Build ID: $CACHED"
-          fi
-
-      - name: Download Rust client depot
-        if: steps.manifest.outputs.changed == 'true'
-        env:
-          STEAM_USER: ${{ secrets.STEAM_USER }}
-          STEAM_PASS: ${{ secrets.STEAM_PASS }}
-        run: |
-          APP_ID="${{ steps.targets.outputs.app_id }}"
-          DEPOT_ID="${{ steps.targets.outputs.depot_id }}"
-          MANIFEST_ID="${{ steps.manifest.outputs.manifest_id }}"
-
-          if [ -z "$STEAM_USER" ] || [ -z "$STEAM_PASS" ]; then
-            echo "::error::STEAM_USER / STEAM_PASS not configured"
-            exit 1
-          fi
-
-          # download_depot with explicit manifest ID — bypasses the
-          # "Invalid default manifest" error that occurs when SteamCMD
-          # can't resolve a default manifest for this depot.
-          # Depot 252495 is the Windows 64-bit client depot (1.08 GiB),
-          # containing GameAssembly.dll and the IL2CPP metadata.
-          "$HOME/steamcmd/steamcmd.sh" \
-            +@sSteamCmdForcePlatformType windows \
-            +login "$STEAM_USER" "$STEAM_PASS" \
-            +download_depot "$APP_ID" "$DEPOT_ID" "$MANIFEST_ID" \
-            +quit
-
-          # download_depot ignores force_install_dir.
-          # Files land in $HOME/Steam/steamapps/content/app_<appid>/depot_<depotid>/
-          STEAM_DEPOT_DIR="$HOME/Steam/steamapps/content/app_${APP_ID}/depot_${DEPOT_ID}"
-
-          if [ ! -d "$STEAM_DEPOT_DIR" ]; then
-            echo "::warning::expected depot dir missing, searching..."
-            STEAM_DEPOT_DIR=$(find "$HOME/Steam" -type d -name "depot_${DEPOT_ID}" -print -quit 2>/dev/null || echo "")
-          fi
-
-          if [ -z "$STEAM_DEPOT_DIR" ] || [ ! -d "$STEAM_DEPOT_DIR" ]; then
-            echo "::error::depot directory not found after download"
-            find "$HOME/Steam" -maxdepth 5 -type d 2>/dev/null | head -60
-            exit 1
-          fi
-
-          echo "=== depot dir: $STEAM_DEPOT_DIR ==="
-          ls -la "$STEAM_DEPOT_DIR" | head -40
-          echo "=== depot size ==="
-          du -sh "$STEAM_DEPOT_DIR" 2>/dev/null || true
-
-          GAMEASSEMBLY=$(find "$STEAM_DEPOT_DIR" -iname "GameAssembly.dll" -print -quit)
-          METADATA=$(find "$STEAM_DEPOT_DIR" -iname "global-metadata.dat" -print -quit)
-
-          if [ -z "$GAMEASSEMBLY" ]; then
-            echo "::error::GameAssembly.dll not found in depot"
-            find "$STEAM_DEPOT_DIR" -maxdepth 5 -type f -printf '%s\t%p\n' 2>/dev/null | sort -rn | head -30
-            exit 1
-          fi
-          if [ -z "$METADATA" ]; then
-            echo "::error::global-metadata.dat not found in depot"
-            find "$STEAM_DEPOT_DIR" -maxdepth 6 -iname "*.dat" -print 2>/dev/null | head -20
-            exit 1
-          fi
-
-          echo "GameAssembly: $GAMEASSEMBLY"
-          echo "Metadata:     $METADATA"
-          echo "GAMEASSEMBLY=$GAMEASSEMBLY" >> $GITHUB_ENV
-          echo "METADATA=$METADATA"         >> $GITHUB_ENV
-
-      - name: Download IL2CPP Dumper
-        if: steps.manifest.outputs.changed == 'true'
-        run: |
-          VERSION="${{ steps.targets.outputs.dumper_version }}"
-
-          try_url() {
-            local url="$1"
-            echo "Trying: $url"
-            if curl -sfL "$url" -o /tmp/il2cpp.zip; then
-              if unzip -tq /tmp/il2cpp.zip > /dev/null 2>&1; then
-                return 0
-              fi
-              echo "  downloaded but not a valid zip"
-            fi
-            return 1
-          }
-
-          if try_url "https://github.com/lxraa/Il2CppDumper/releases/download/v${VERSION}/Il2CppDumper-net8-linux-x64.zip"; then
-            echo "Using lxraa fork v${VERSION}"
-          elif try_url "https://github.com/Perfare/Il2CppDumper/releases/download/v${VERSION}/Il2CppDumper-net6-linux-x64.zip"; then
-            echo "Using Perfare upstream v${VERSION}"
-          else
-            echo "::error::Could not download any IL2CPP Dumper release"
-            exit 1
-          fi
-
-          mkdir -p /tmp/il2cpp
-          unzip -q /tmp/il2cpp.zip -d /tmp/il2cpp
-
-          DUMPER_BIN=$(find /tmp/il2cpp -type f \( -name "Il2CppDumper" -o -name "Il2CppDumper.dll" \) | head -n1)
-          if [ -z "$DUMPER_BIN" ]; then
-            echo "::error::Dumper binary not found in extracted archive"
-            find /tmp/il2cpp -maxdepth 3 -type f | head -50
-            exit 1
-          fi
-
-          chmod +x "$DUMPER_BIN"
-          echo "DUMPER_BIN=$DUMPER_BIN" >> $GITHUB_ENV
-          echo "Dumper: $DUMPER_BIN"
-
-      - name: Run IL2CPP Dumper
-        if: steps.manifest.outputs.changed == 'true'
-        run: |
-          mkdir -p /tmp/output
-          cd /tmp/output
-
-          "$DUMPER_BIN" "$GAMEASSEMBLY" "$METADATA" /tmp/output || {
-            echo "::error::IL2CPP Dumper failed"
-            exit 1
-          }
-
-          echo "=== Dumper output ==="
-          ls -la /tmp/output/
-          echo "=== dump.cs line count ==="
-          wc -l /tmp/output/dump.cs
-
-      - name: Parse offsets
-        if: steps.manifest.outputs.changed == 'true'
-        run: |
-          OUTPUT_HEADER="${{ steps.targets.outputs.output_header }}"
-          python3 scripts/parse_offsets.py \
-            /tmp/output/dump.cs \
-            targets.json \
-            "$OUTPUT_HEADER" || {
-              echo "::error::Parser failed"
-              exit 1
-            }
-
-      - name: Validate offsets
-        if: steps.manifest.outputs.changed == 'true'
-        id: validate
-        run: |
-          OUTPUT_HEADER="${{ steps.targets.outputs.output_header }}"
-          python3 scripts/validate_offsets.py \
-            /tmp/output/dump.cs \
-            targets.json \
-            "$OUTPUT_HEADER" > /tmp/validation_report.txt 2>&1 || true
-
-          cat /tmp/validation_report.txt
-
-          if grep -qiE "missing|not found|fail" /tmp/validation_report.txt; then
-            echo "validation_failed=true" >> $GITHUB_OUTPUT
-          else
-            echo "validation_failed=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Update cached build ID
-        if: steps.manifest.outputs.changed == 'true'
-        run: echo "${{ steps.manifest.outputs.build_id }}" > .last_buildid
-
-      - name: Commit and push
-        if: steps.manifest.outputs.changed == 'true'
-        id: commit
-        run: |
-          OUTPUT_HEADER="${{ steps.targets.outputs.output_header }}"
-          git config user.name  'offsets-bot'
-          git config user.email 'offsets-bot@users.noreply.github.com'
-
-          git add "$OUTPUT_HEADER" .last_buildid
-
-          if git diff --staged --quiet; then
-            echo "No changes to commit"
-            echo "committed=false" >> $GITHUB_OUTPUT
-          else
-            git commit -m "Update offsets (build ${{ steps.manifest.outputs.build_id }})"
-            git push
-            echo "committed=true" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Notify on validation failure
-        if: steps.manifest.outputs.changed == 'true' && steps.validate.outputs.validation_failed == 'true'
-        env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-        run: |
-          python3 scripts/notify.py \
-            --title "Offset validation warning" \
-            --message "Build ${{ steps.manifest.outputs.build_id }} dumped, but some offsets are missing." \
-            --report /tmp/validation_report.txt
-
-      - name: Notify on success
-        if: steps.manifest.outputs.changed == 'true' && steps.commit.outputs.committed == 'true' && steps.validate.outputs.validation_failed != 'true'
-        env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-        run: |
-          python3 scripts/notify.py \
-            --title "Offsets updated" \
-            --message "Build ${{ steps.manifest.outputs.build_id }} dumped. All targets found."
-
-      - name: Notify on failure
-        if: failure()
-        env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-        run: |
-          python3 scripts/notify.py \
-            --title "Offset pipeline failed" \
-            --message "Workflow failed at step: ${{ github.job }}. Check logs."
+{
+  "app_id": "252490",
+  "depot_id": "252495",
+  "output_header": "offsets.h",
+  "il2cpp_dumper_version": "6.7.46-lxraa.1",
+  "classes": {
+    "BaseNetworkable": {
+      "fields": ["clientEntities"],
+      "static": true
+    },
+    "BasePlayer": {
+      "fields": [
+        "_position",
+        "_health",
+        "_maxHealth",
+        "_displayName",
+        "_team",
+        "_isLocalPlayer",
+        "_isDead",
+        "_playerModel",
+        "_userID"
+      ],
+      "static": false
+    },
+    "PlayerModel": {
+      "fields": ["_headPosition"],
+      "static": false
+    },
+    "MainCamera": {
+      "fields": ["_viewMatrix"],
+      "static": true
+    },
+    "BaseCombatEntity": {
+      "fields": ["_health", "_maxHealth"],
+      "static": false
+    },
+    "BaseEntity": {
+      "fields": ["_position", "_rotation"],
+      "static": false
+    }
+  }
+}
