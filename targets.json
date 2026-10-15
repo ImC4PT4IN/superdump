@@ -1,9 +1,7 @@
 {
-  "app_id": "252490",
-  "steam_user_secret": "STEAM_USER",
-  "steam_pass_secret": "STEAM_PASS",
-  "steam_guard_secret": "STEAM_GUARD",
+  "app_id": "258550",
   "il2cpp_dumper_version": "6.7.46-lxraa.1",
+  "output_header": "offsets.h",
   "classes": {
     "BaseNetworkable": {
       "fields": ["clientEntities"],
