@@ -32,8 +32,9 @@ jobs:
           APP_ID=$(jq -r '.app_id' targets.json)
           DUMPER_VERSION=$(jq -r '.il2cpp_dumper_version' targets.json)
           OUTPUT_HEADER=$(jq -r '.output_header // "offsets.h"' targets.json)
+          DEPOT_ID=$(jq -r '.depot_id // "252491"' targets.json)
 
-          for v in APP_ID DUMPER_VERSION OUTPUT_HEADER; do
+          for v in APP_ID DUMPER_VERSION OUTPUT_HEADER DEPOT_ID; do
             if [ -z "${!v}" ] || [ "${!v}" = "null" ]; then
               echo "::error::$v missing from targets.json"
               exit 1
@@ -43,6 +44,7 @@ jobs:
           echo "app_id=$APP_ID"                 >> $GITHUB_OUTPUT
           echo "dumper_version=$DUMPER_VERSION" >> $GITHUB_OUTPUT
           echo "output_header=$OUTPUT_HEADER"   >> $GITHUB_OUTPUT
+          echo "depot_id=$DEPOT_ID"             >> $GITHUB_OUTPUT
 
       - name: Free disk space
         run: |
@@ -109,47 +111,62 @@ jobs:
             echo "No update. Build ID: $CACHED"
           fi
 
-      - name: Download Rust client via SteamCMD
+      - name: Download Rust client depot via SteamCMD
         if: steps.manifest.outputs.changed == 'true'
         env:
           STEAM_USER: ${{ secrets.STEAM_USER }}
           STEAM_PASS: ${{ secrets.STEAM_PASS }}
         run: |
           APP_ID="${{ steps.targets.outputs.app_id }}"
+          DEPOT_ID="${{ steps.targets.outputs.depot_id }}"
 
           if [ -z "$STEAM_USER" ] || [ -z "$STEAM_PASS" ]; then
             echo "::error::STEAM_USER / STEAM_PASS not configured"
             exit 1
           fi
 
-          mkdir -p /tmp/rust
-
-          # Rust client is Windows-only. Force the Windows depot on Linux runner.
+          # download_depot grabs a single depot — skips HD textures and DLC.
+          # Base depot is ~15 GB vs ~56 GB for the full app_update.
           "$HOME/steamcmd/steamcmd.sh" \
             +@sSteamCmdForcePlatformType windows \
-            +force_install_dir /tmp/rust \
             +login "$STEAM_USER" "$STEAM_PASS" \
-            +app_update "$APP_ID" validate \
+            +download_depot "$APP_ID" "$DEPOT_ID" \
             +quit
 
-          echo "=== /tmp/rust top-level ==="
-          ls -la /tmp/rust/ | head -40
+          # download_depot ignores force_install_dir. Files land under
+          # $HOME/Steam/steamapps/content/app_<appid>/depot_<depotid>/
+          STEAM_DEPOT_DIR="$HOME/Steam/steamapps/content/app_${APP_ID}/depot_${DEPOT_ID}"
 
-          echo "=== Disk usage of top entries ==="
-          du -sh /tmp/rust/* 2>/dev/null | sort -rh | head -20 || true
+          if [ ! -d "$STEAM_DEPOT_DIR" ]; then
+            echo "::warning::expected depot dir missing, searching..."
+            STEAM_DEPOT_DIR=$(find "$HOME/Steam" -type d -name "depot_${DEPOT_ID}" -print -quit 2>/dev/null || echo "")
+          fi
 
-          GAMEASSEMBLY=$(find /tmp/rust -iname "GameAssembly.dll" -print -quit)
-          METADATA=$(find /tmp/rust -iname "global-metadata.dat" -print -quit)
+          if [ -z "$STEAM_DEPOT_DIR" ] || [ ! -d "$STEAM_DEPOT_DIR" ]; then
+            echo "::error::depot directory not found after download"
+            echo "=== \$HOME/Steam tree ==="
+            find "$HOME/Steam" -maxdepth 5 -type d 2>/dev/null | head -60
+            exit 1
+          fi
+
+          echo "=== depot dir: $STEAM_DEPOT_DIR ==="
+          ls -la "$STEAM_DEPOT_DIR" | head -40
+          echo "=== depot size ==="
+          du -sh "$STEAM_DEPOT_DIR" 2>/dev/null || true
+
+          GAMEASSEMBLY=$(find "$STEAM_DEPOT_DIR" -iname "GameAssembly.dll" -print -quit)
+          METADATA=$(find "$STEAM_DEPOT_DIR" -iname "global-metadata.dat" -print -quit)
 
           if [ -z "$GAMEASSEMBLY" ]; then
-            echo "::error::GameAssembly.dll not found after download"
-            echo "=== Largest files under /tmp/rust ==="
-            find /tmp/rust -maxdepth 4 -type f -printf '%s\t%p\n' 2>/dev/null | sort -rn | head -30
+            echo "::error::GameAssembly.dll not found in depot"
+            echo "=== Largest files in depot ==="
+            find "$STEAM_DEPOT_DIR" -maxdepth 5 -type f -printf '%s\t%p\n' 2>/dev/null | sort -rn | head -30
             exit 1
           fi
           if [ -z "$METADATA" ]; then
-            echo "::error::global-metadata.dat not found after download"
-            find /tmp/rust -maxdepth 5 -iname "*.dat" -print | head -20
+            echo "::error::global-metadata.dat not found in depot"
+            echo "=== All .dat files in depot ==="
+            find "$STEAM_DEPOT_DIR" -maxdepth 6 -iname "*.dat" -print 2>/dev/null | head -20
             exit 1
           fi
 
