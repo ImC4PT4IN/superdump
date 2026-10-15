@@ -95,7 +95,15 @@ jobs:
             https://github.com/roytu/Il2CppDumper.git /tmp/il2cpp-src
 
           cd /tmp/il2cpp-src
-          "$HOME/.dotnet/dotnet" build -c Release -o /tmp/il2cpp-build
+
+          # Pin the target framework to net8.0. The project multi-targets
+          # net6.0 and net8.0; building both into one -o dir causes a race
+          # on Il2CppDumper.deps.json ("being used by another process").
+          "$HOME/.dotnet/dotnet" build \
+            -c Release \
+            -f net8.0 \
+            -o /tmp/il2cpp-build \
+            Il2CppDumper/Il2CppDumper.csproj
 
           DUMPER_DLL=$(find /tmp/il2cpp-build -name "Il2CppDumper.dll" -print -quit)
           if [ -z "$DUMPER_DLL" ]; then
