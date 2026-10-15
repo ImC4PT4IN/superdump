@@ -1,32 +1,4 @@
 {
   "output_header": "offsets.h",
-  "rust_data_url": "https://raw.githubusercontent.com/etr-dev/Rust-Data/master/output/rust.h",
-  "fields": {
-    "BasePlayer": [
-      "playerModel",
-      "bagCount",
-      "_lookingAt",
-      "startHealth",
-      "skeletonProperties",
-      "baseProtection",
-      "crafting",
-      "loot",
-      "clothingBlocks",
-      "activeItem",
-      "input",
-      "movement",
-      "eyes",
-      "inventory",
-      "metabolism",
-      "modelState"
-    ],
-    "MainCamera": [
-      "mainCamera",
-      "camera",
-      "viewMatrix"
-    ],
-    "BaseNetworkable": [
-      "clientEntities"
-    ]
-  }
+  "rust_data_url": "https://raw.githubusercontent.com/etr-dev/Rust-Data/master/output/rust.h"
 }
