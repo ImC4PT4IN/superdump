@@ -85,18 +85,38 @@ jobs:
           echo "$HOME/.dotnet" >> $GITHUB_PATH
           "$HOME/.dotnet/dotnet" --version
 
-      - name: Build lxraa Il2CppDumper (v39 fork)
+      - name: Build lxraa Il2CppDumper (v39 fork, DummyDll patched)
         run: |
-          # lxraa fork is based on Perfare v6.7.46 with the v39 metadata support
-          # merged and the DummyDll regressions fixed. The roytu fork has a
-          # known IndexOutOfRangeException in DummyAssemblyGenerator on v39.
+          # lxraa fork: Perfare v6.7.46 + v39 metadata support + DummyDll fixes.
           git clone --depth 1 \
             https://github.com/lxraa/Il2CppDumper.git /tmp/il2cpp-src
 
           cd /tmp/il2cpp-src
 
-          # Pin the target framework to net8.0 to avoid the multi-target race
-          # on Il2CppDumper.deps.json ("being used by another process").
+          # Patch Program.cs to hardcode GenerateDummyDll = false.
+          # The v39 DummyDll path still throws ArgumentOutOfRangeException in
+          # DummyAssemblyGenerator.CreateGenericParameter. We only need dump.cs,
+          # so skip the export entirely — no crash possible regardless of config.
+          python3 - <<'PYEOF'
+import re
+p = "/tmp/il2cpp-src/Il2CppDumper/Program.cs"
+src = open(p).read()
+# Find the call to DummyAssemblyExporter.Export and guard it with a config check.
+src = re.sub(
+    r'DummyAssemblyExporter\.Export\(([^;]+)\);',
+    r'if (config.GenerateDummyDll) DummyAssemblyExporter.Export(\1);',
+    src
+)
+# Also force the default to false if the config is missing or unreadable.
+src = src.replace(
+    'config = JsonSerializer.Deserialize(File.ReadAllText(AppDomain.CurrentDomain.BaseDirectory + @"config.json"));',
+    'try { config = JsonSerializer.Deserialize(File.ReadAllText(AppDomain.CurrentDomain.BaseDirectory + @"config.json")); } catch { config = new Config(); } config.GenerateDummyDll = false; config.RequireAnyKey = false;'
+)
+open(p, "w").write(src)
+print("Program.cs patched")
+PYEOF
+
+          # Pin net8.0 to avoid the multi-target race on Il2CppDumper.deps.json.
           "$HOME/.dotnet/dotnet" build \
             -c Release \
             -f net8.0 \
@@ -109,6 +129,27 @@ jobs:
             find /tmp/il2cpp-build -type f | head -40
             exit 1
           fi
+
+          # Write config.json next to the DLL — that's where the dumper reads it.
+          cat > /tmp/il2cpp-build/config.json <<'EOF'
+          {
+            "DumpMethod": true,
+            "DumpField": true,
+            "DumpProperty": true,
+            "DumpAttribute": false,
+            "DumpFieldOffset": true,
+            "DumpMethodOffset": true,
+            "DumpTypeDefIndex": true,
+            "GenerateDummyDll": false,
+            "GenerateScript": true,
+            "DummyDllAddToken": false,
+            "RequireAnyKey": false,
+            "ForceIl2CppVersion": false,
+            "ForceVersion": 24,
+            "ForceDump": false,
+            "NoRedirectedPointer": false
+          }
+          EOF
 
           echo "Dumper DLL: $DUMPER_DLL"
           echo "DUMPER_DLL=$DUMPER_DLL" >> $GITHUB_ENV
@@ -212,29 +253,6 @@ jobs:
         run: |
           mkdir -p /tmp/output
           cd /tmp/output
-
-          # Disable DummyDll generation and the exit prompt. We only need
-          # dump.cs for offset extraction. The DummyDll path is the crash
-          # source on v39 metadata.
-          cat > config.json <<'EOF'
-          {
-            "DumpMethod": true,
-            "DumpField": true,
-            "DumpProperty": true,
-            "DumpAttribute": false,
-            "DumpFieldOffset": true,
-            "DumpMethodOffset": true,
-            "DumpTypeDefIndex": true,
-            "GenerateDummyDll": false,
-            "GenerateScript": true,
-            "DummyDllAddToken": false,
-            "RequireAnyKey": false,
-            "ForceIl2CppVersion": false,
-            "ForceVersion": 24,
-            "ForceDump": false,
-            "NoRedirectedPointer": false
-          }
-          EOF
 
           "$HOME/.dotnet/dotnet" "$DUMPER_DLL" "$GAMEASSEMBLY" "$METADATA" /tmp/output || {
             echo "::error::IL2CPP Dumper failed"
