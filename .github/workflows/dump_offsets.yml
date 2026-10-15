@@ -190,31 +190,28 @@ jobs:
         run: |
           VERSION="${{ steps.targets.outputs.dumper_version }}"
 
-          try_url() {
-            local url="$1"
-            echo "Trying: $url"
-            if curl -sfL "$url" -o /tmp/il2cpp.zip; then
-              if unzip -tq /tmp/il2cpp.zip > /dev/null 2>&1; then
-                return 0
-              fi
-              echo "  downloaded but not a valid zip"
-            fi
-            return 1
-          }
+          # MlgmXyysd standalone provides Linux x64 binaries.
+          # Asset naming: Il2CppDumper-<version>-linux-x64.zip
+          URL="https://github.com/MlgmXyysd/Il2CppDumper-Standalone/releases/download/v${VERSION}-standalone/Il2CppDumper-${VERSION}-linux-x64.zip"
 
-          if try_url "https://github.com/lxraa/Il2CppDumper/releases/download/v${VERSION}/Il2CppDumper-net8-linux-x64.zip"; then
-            echo "Using lxraa fork v${VERSION}"
-          elif try_url "https://github.com/Perfare/Il2CppDumper/releases/download/v${VERSION}/Il2CppDumper-net6-linux-x64.zip"; then
-            echo "Using Perfare upstream v${VERSION}"
-          else
-            echo "::error::Could not download any IL2CPP Dumper release"
+          echo "Trying: $URL"
+          if ! curl -sfL "$URL" -o /tmp/il2cpp.zip; then
+            echo "::error::Could not download Il2CppDumper Standalone"
+            echo "=== Listing available release assets to verify naming ==="
+            curl -sf "https://api.github.com/repos/MlgmXyysd/Il2CppDumper-Standalone/releases/tags/v${VERSION}-standalone" \
+              | jq -r '.assets[].name' 2>/dev/null || true
+            exit 1
+          fi
+
+          if ! unzip -tq /tmp/il2cpp.zip > /dev/null 2>&1; then
+            echo "::error::Downloaded file is not a valid zip"
             exit 1
           fi
 
           mkdir -p /tmp/il2cpp
           unzip -q /tmp/il2cpp.zip -d /tmp/il2cpp
 
-          DUMPER_BIN=$(find /tmp/il2cpp -type f \( -name "Il2CppDumper" -o -name "Il2CppDumper.dll" \) | head -n1)
+          DUMPER_BIN=$(find /tmp/il2cpp -type f -name "Il2CppDumper" | head -n1)
           if [ -z "$DUMPER_BIN" ]; then
             echo "::error::Dumper binary not found in extracted archive"
             find /tmp/il2cpp -maxdepth 3 -type f | head -50
@@ -239,7 +236,7 @@ jobs:
           echo "=== Dumper output ==="
           ls -la /tmp/output/
           echo "=== dump.cs line count ==="
-          wc -l /tmp/output/dump.cs
+          wc -l /tmp/output/dump.cs || true
 
       - name: Parse offsets
         if: steps.manifest.outputs.changed == 'true'
