@@ -1,61 +1,33 @@
-name: Dump Rust Offsets
+name: Rust Offset Watch
 
 on:
   schedule:
     - cron: '0 */6 * * *'
   workflow_dispatch:
     inputs:
-      force_dump:
-        description: 'Force a dump even if build ID is unchanged'
+      force_check:
+        description: 'Force a check even if the hash is unchanged'
         type: boolean
         default: false
 
 jobs:
-  dump:
+  check:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     permissions:
       contents: write
       issues: write
 
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 1
 
-      - name: Read targets.json
-        id: targets
-        run: |
-          APP_ID=$(jq -r '.app_id' targets.json)
-          DEPOT_ID=$(jq -r '.depot_id' targets.json)
-          OUTPUT_HEADER=$(jq -r '.output_header // "offsets.h"' targets.json)
-
-          for v in APP_ID DEPOT_ID OUTPUT_HEADER; do
-            if [ -z "${!v}" ] || [ "${!v}" = "null" ]; then
-              echo "::error::$v missing from targets.json"
-              exit 1
-            fi
-          done
-
-          echo "app_id=$APP_ID"               >> $GITHUB_OUTPUT
-          echo "depot_id=$DEPOT_ID"           >> $GITHUB_OUTPUT
-          echo "output_header=$OUTPUT_HEADER" >> $GITHUB_OUTPUT
-
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet            &
-          sudo rm -rf /usr/local/lib/android      &
-          sudo rm -rf /opt/ghc                     &
-          sudo rm -rf /usr/local/share/boost      &
-          sudo rm -rf /usr/share/swift            &
-          sudo rm -rf /opt/hostedtoolcache/CodeQL &
-          wait
-          sudo rm -rf /opt/hostedtoolcache/node* &
-          sudo rm -rf /opt/hostedtoolcache/Java* &
-          sudo rm -rf /opt/hostedtoolcache/Ruby* &
-          sudo rm -rf /opt/hostedtoolcache/PyPy* &
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /usr/share/swift /opt/hostedtoolcache/CodeQL &
           wait
           sudo docker image prune -af || true
           df -h /
@@ -63,48 +35,20 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq python3-pip unzip curl
-
+          sudo apt-get install -y jq curl
           mkdir -p "$HOME/steamcmd"
           curl -sqL "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz" \
             | tar zxvf - -C "$HOME/steamcmd"
           "$HOME/steamcmd/steamcmd.sh" +quit || true
-          echo "$HOME/steamcmd" >> $GITHUB_PATH
 
-          pip3 install -r scripts/requirements.txt 2>/dev/null || true
-
-      - name: Install Rust
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-
-      - name: Build rodroid dumper
-        run: |
-          git clone --depth 1 https://github.com/rodroidmods/il2cpp-dumper-rs.git /tmp/dumper-src
-          cd /tmp/dumper-src
-          cargo build --release
-          DUMPER_BIN=$(find /tmp/dumper-src -name "il2cpp_dumper" -type f | head -n1)
-          if [ -z "$DUMPER_BIN" ]; then
-            echo "::error::dumper binary not found"
-            exit 1
-          fi
-          chmod +x "$DUMPER_BIN"
-          echo "DUMPER_BIN=$DUMPER_BIN" >> $GITHUB_ENV
-          echo "Dumper: $DUMPER_BIN"
-
-      - name: Resolve manifest ID for depot
+      - name: Resolve manifest
         id: manifest
         run: |
-          APP_ID="${{ steps.targets.outputs.app_id }}"
-          DEPOT_ID="${{ steps.targets.outputs.depot_id }}"
+          APP_ID=252490
+          DEPOT_ID=252495
 
           MANIFEST_ID=$(curl -sf "https://api.steamcmd.net/v1/info/${APP_ID}" \
             | jq -r ".data.\"${APP_ID}\".depots.\"${DEPOT_ID}\".manifests.public.gid" 2>/dev/null || echo "")
-
-          if [ -z "$MANIFEST_ID" ] || [ "$MANIFEST_ID" = "null" ]; then
-            echo "::warning::Could not resolve manifest; relying on SteamCMD default"
-            MANIFEST_ID=""
-          fi
           echo "manifest_id=$MANIFEST_ID" >> $GITHUB_OUTPUT
 
           BUILD_ID=$(curl -sf "https://api.steamcmd.net/v1/info/${APP_ID}" \
@@ -115,32 +59,28 @@ jobs:
 
           if [ "$BUILD_ID" != "$CACHED" ]; then
             echo "changed=true" >> $GITHUB_OUTPUT
-            echo "Build changed: $CACHED -> $BUILD_ID"
-          elif [ "${{ inputs.force_dump }}" = "true" ]; then
+          elif [ "${{ inputs.force_check }}" = "true" ]; then
             echo "changed=true" >> $GITHUB_OUTPUT
-            echo "Forced dump"
           else
             echo "changed=false" >> $GITHUB_OUTPUT
-            echo "No update. Build ID: $CACHED"
           fi
 
-      - name: Download Rust client depot
+          echo "Current build: $BUILD_ID (cached: $CACHED)"
+
+      - name: Download latest GameAssembly
         if: steps.manifest.outputs.changed == 'true'
         env:
           STEAM_USER: ${{ secrets.STEAM_USER }}
           STEAM_PASS: ${{ secrets.STEAM_PASS }}
         run: |
-          APP_ID="${{ steps.targets.outputs.app_id }}"
-          DEPOT_ID="${{ steps.targets.outputs.depot_id }}"
-          MANIFEST_ID="${{ steps.manifest.outputs.manifest_id }}"
-
           if [ -z "$STEAM_USER" ] || [ -z "$STEAM_PASS" ]; then
             echo "::error::STEAM_USER / STEAM_PASS not configured"
             exit 1
           fi
 
-          DEPOT_ARGS="$APP_ID $DEPOT_ID"
-          [ -n "$MANIFEST_ID" ] && DEPOT_ARGS="$APP_ID $DEPOT_ID $MANIFEST_ID"
+          MANIFEST_ID="${{ steps.manifest.outputs.manifest_id }}"
+          DEPOT_ARGS="252490 252495"
+          [ -n "$MANIFEST_ID" ] && DEPOT_ARGS="252490 252495 $MANIFEST_ID"
 
           "$HOME/steamcmd/steamcmd.sh" \
             +@sSteamCmdForcePlatformType windows \
@@ -148,103 +88,58 @@ jobs:
             +download_depot $DEPOT_ARGS \
             +quit
 
-          STEAM_DEPOT_DIR=$(find "$HOME" -type d -name "depot_${DEPOT_ID}" -print -quit 2>/dev/null || echo "")
-          if [ -z "$STEAM_DEPOT_DIR" ] || [ ! -d "$STEAM_DEPOT_DIR" ]; then
-            echo "::error::depot directory not found"
-            find "$HOME" -type d -name "depot_${DEPOT_ID}" 2>/dev/null || true
-            find "$HOME" -type d -name "content" -path "*steamapps*" 2>/dev/null || true
+          DEPOT_DIR=$(find "$HOME" -type d -name "depot_252495" -print -quit 2>/dev/null || echo "")
+          if [ -z "$DEPOT_DIR" ]; then
+            echo "::error::depot not found"
             exit 1
           fi
 
-          GAMEASSEMBLY=$(find "$STEAM_DEPOT_DIR" -iname "GameAssembly.dll" -print -quit)
-          METADATA=$(find "$STEAM_DEPOT_DIR" -iname "global-metadata.dat" -print -quit)
-
-          if [ -z "$GAMEASSEMBLY" ]; then
+          GA="$DEPOT_DIR/GameAssembly.dll"
+          if [ ! -f "$GA" ]; then
             echo "::error::GameAssembly.dll not found"
-            find "$STEAM_DEPOT_DIR" -maxdepth 5 -type f -printf '%s\t%p\n' 2>/dev/null | sort -rn | head -30
-            exit 1
-          fi
-          if [ -z "$METADATA" ]; then
-            echo "::error::global-metadata.dat not found"
-            find "$STEAM_DEPOT_DIR" -maxdepth 6 -iname "*.dat" -print 2>/dev/null | head -20
             exit 1
           fi
 
-          echo "GAMEASSEMBLY=$GAMEASSEMBLY" >> $GITHUB_ENV
-          echo "METADATA=$METADATA"         >> $GITHUB_ENV
+          SHA=$(sha256sum "$GA" | awk '{print $1}')
+          echo "gameassembly_sha=$SHA" >> $GITHUB_OUTPUT
+          echo "GameAssembly SHA256: $SHA"
 
-      - name: Run dumper
-        if: steps.manifest.outputs.changed == 'true'
-        run: |
-          mkdir -p /tmp/output
-          # Create config to skip unnecessary output
-          cat > /tmp/dumper-config.json <<'EOF'
-          {
-            "dumpMethod": false,
-            "dumpField": true,
-            "dumpProperty": false,
-            "dumpAttribute": false,
-            "dumpMethodOffset": false,
-            "dumpFieldOffset": true,
-            "dumpTypeDefIndex": true,
-            "dumpAssemblyName": false,
-            "generateStruct": false,
-            "generateDummyDll": false,
-            "generateCppScaffold": false,
-            "requireAnyKey": false,
-            "splitDumpPerType": false
-          }
-          EOF
+          PREV_SHA=$(cat .last_gameassembly_sha 2>/dev/null || echo "none")
+          echo "Previous SHA: $PREV_SHA"
 
-          cp /tmp/dumper-config.json /tmp/output/config.json
-          "$DUMPER_BIN" "$GAMEASSEMBLY" "$METADATA" /tmp/output || {
-            echo "::error::dumper failed"
-            exit 1
-          }
-
-          echo "=== dump.cs line count ==="
-          wc -l /tmp/output/dump.cs
-
-      - name: Parse offsets
-        if: steps.manifest.outputs.changed == 'true'
-        run: |
-          OUTPUT_HEADER="${{ steps.targets.outputs.output_header }}"
-          python3 scripts/parse_offsets.py \
-            /tmp/output/dump.cs \
-            scripts/mapping.json \
-            "$OUTPUT_HEADER" || {
-              echo "::error::parser failed"
-              exit 1
-            }
-
-      - name: Update cached build ID
-        if: steps.manifest.outputs.changed == 'true'
-        run: echo "${{ steps.manifest.outputs.build_id }}" > .last_buildid
-
-      - name: Commit and push
-        if: steps.manifest.outputs.changed == 'true'
-        id: commit
-        run: |
-          OUTPUT_HEADER="${{ steps.targets.outputs.output_header }}"
-          git config user.name  'offsets-bot'
-          git config user.email 'offsets-bot@users.noreply.github.com'
-          git add "$OUTPUT_HEADER" .last_buildid || true
-          if git diff --staged --quiet; then
-            echo "committed=false" >> $GITHUB_OUTPUT
+          if [ "$SHA" != "$PREV_SHA" ]; then
+            echo "binary_changed=true" >> $GITHUB_OUTPUT
           else
-            git commit -m "Update offsets (build ${{ steps.manifest.outputs.build_id }})"
-            git push
-            echo "committed=true" >> $GITHUB_OUTPUT
+            echo "binary_changed=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Notify on success
-        if: steps.manifest.outputs.changed == 'true' && steps.commit.outputs.committed == 'true'
+      - name: Save new build ID and hash
+        if: steps.manifest.outputs.changed == 'true'
+        run: |
+          echo "${{ steps.manifest.outputs.build_id }}" > .last_buildid
+          echo "${{ steps.download.outputs.gameassembly_sha }}" > .last_gameassembly_sha || true
+
+      - name: Commit state files
+        if: steps.manifest.outputs.changed == 'true'
+        run: |
+          git config user.name 'offsets-watcher'
+          git config user.email 'offsets-watcher@users.noreply.github.com'
+          git add .last_buildid .last_gameassembly_sha 2>/dev/null || git add .last_buildid || true
+          if git diff --staged --quiet; then
+            echo "No changes"
+          else
+            git commit -m "Rust build ${{ steps.manifest.outputs.build_id }}"
+            git push
+          fi
+
+      - name: Notify on update
+        if: steps.manifest.outputs.changed == 'true'
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
           python3 scripts/notify.py \
-            --title "Offsets updated" \
-            --message "Build ${{ steps.manifest.outputs.build_id }} dumped and committed." || true
+            --title "Rust updated" \
+            --message "Build ${{ steps.manifest.outputs.build_id }}. New GameAssembly SHA. Check if offsets.h needs updating." || true
 
       - name: Notify on failure
         if: failure()
@@ -252,5 +147,5 @@ jobs:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
           python3 scripts/notify.py \
-            --title "Offset pipeline failed" \
+            --title "Rust watch failed" \
             --message "Workflow failed. Check logs." || true
