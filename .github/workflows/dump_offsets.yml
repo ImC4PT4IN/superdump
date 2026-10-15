@@ -31,20 +31,18 @@ jobs:
         run: |
           APP_ID=$(jq -r '.app_id' targets.json)
           DEPOT_ID=$(jq -r '.depot_id' targets.json)
-          DUMPER_VERSION=$(jq -r '.il2cpp_dumper_version' targets.json)
           OUTPUT_HEADER=$(jq -r '.output_header // "offsets.h"' targets.json)
 
-          for v in APP_ID DEPOT_ID DUMPER_VERSION OUTPUT_HEADER; do
+          for v in APP_ID DEPOT_ID OUTPUT_HEADER; do
             if [ -z "${!v}" ] || [ "${!v}" = "null" ]; then
               echo "::error::$v missing from targets.json"
               exit 1
             fi
           done
 
-          echo "app_id=$APP_ID"                 >> $GITHUB_OUTPUT
-          echo "depot_id=$DEPOT_ID"             >> $GITHUB_OUTPUT
-          echo "dumper_version=$DUMPER_VERSION" >> $GITHUB_OUTPUT
-          echo "output_header=$OUTPUT_HEADER"   >> $GITHUB_OUTPUT
+          echo "app_id=$APP_ID"               >> $GITHUB_OUTPUT
+          echo "depot_id=$DEPOT_ID"           >> $GITHUB_OUTPUT
+          echo "output_header=$OUTPUT_HEADER" >> $GITHUB_OUTPUT
 
       - name: Free disk space
         run: |
@@ -79,6 +77,35 @@ jobs:
           echo "$HOME/steamcmd" >> $GITHUB_PATH
 
           pip3 install -r scripts/requirements.txt
+
+      - name: Install .NET SDK
+        run: |
+          # .NET 8.0 SDK — used to build the roytu v39 fork from source.
+          curl -sSL https://dot.net/v1/dotnet-install.sh \
+            | bash /dev/stdin --channel 8.0
+          echo "$HOME/.dotnet" >> $GITHUB_PATH
+          "$HOME/.dotnet/dotnet" --version
+
+      - name: Build roytu Il2CppDumper (v39 fork)
+        run: |
+          # The roytu fork is the only Il2CppDumper branch with metadata v39
+          # support that compiles on Linux. No prebuilt binaries exist, so we
+          # clone and build it on the runner.
+          git clone --depth 1 --branch v39 \
+            https://github.com/roytu/Il2CppDumper.git /tmp/il2cpp-src
+
+          cd /tmp/il2cpp-src
+          "$HOME/.dotnet/dotnet" build -c Release -o /tmp/il2cpp-build
+
+          DUMPER_DLL=$(find /tmp/il2cpp-build -name "Il2CppDumper.dll" -print -quit)
+          if [ -z "$DUMPER_DLL" ]; then
+            echo "::error::Il2CppDumper.dll not found after build"
+            find /tmp/il2cpp-build -type f | head -40
+            exit 1
+          fi
+
+          echo "Dumper DLL: $DUMPER_DLL"
+          echo "DUMPER_DLL=$DUMPER_DLL" >> $GITHUB_ENV
 
       - name: Resolve manifest ID for depot
         id: manifest
@@ -130,8 +157,6 @@ jobs:
             exit 1
           fi
 
-          # Build the download_depot args. If MANIFEST_ID resolved, pass it
-          # explicitly — this avoids the "Invalid default manifest" error.
           DEPOT_ARGS="$APP_ID $DEPOT_ID"
           if [ -n "$MANIFEST_ID" ]; then
             DEPOT_ARGS="$APP_ID $DEPOT_ID $MANIFEST_ID"
@@ -143,25 +168,18 @@ jobs:
             +download_depot $DEPOT_ARGS \
             +quit
 
-          # SteamCMD's install root follows the binary location, not $HOME/Steam.
-          # The depot lands under $HOME/steamcmd/linux32/steamapps/content/...
-          # Search $HOME recursively — never hardcode the path.
           STEAM_DEPOT_DIR=$(find "$HOME" -type d -name "depot_${DEPOT_ID}" -print -quit 2>/dev/null || echo "")
 
           if [ -z "$STEAM_DEPOT_DIR" ] || [ ! -d "$STEAM_DEPOT_DIR" ]; then
             echo "::error::depot directory not found after download"
-            echo "=== searching \$HOME for depot_${DEPOT_ID} ==="
             find "$HOME" -type d -name "depot_${DEPOT_ID}" 2>/dev/null || true
-            echo "=== any steamapps/content trees ==="
             find "$HOME" -type d -name "content" -path "*steamapps*" 2>/dev/null || true
-            echo "=== top-level \$HOME ==="
             ls -la "$HOME" | head -40
             exit 1
           fi
 
           echo "=== depot dir: $STEAM_DEPOT_DIR ==="
           ls -la "$STEAM_DEPOT_DIR" | head -40
-          echo "=== depot size ==="
           du -sh "$STEAM_DEPOT_DIR" 2>/dev/null || true
 
           GAMEASSEMBLY=$(find "$STEAM_DEPOT_DIR" -iname "GameAssembly.dll" -print -quit)
@@ -169,13 +187,11 @@ jobs:
 
           if [ -z "$GAMEASSEMBLY" ]; then
             echo "::error::GameAssembly.dll not found in depot"
-            echo "=== Largest files in depot ==="
             find "$STEAM_DEPOT_DIR" -maxdepth 5 -type f -printf '%s\t%p\n' 2>/dev/null | sort -rn | head -30
             exit 1
           fi
           if [ -z "$METADATA" ]; then
             echo "::error::global-metadata.dat not found in depot"
-            echo "=== All .dat files in depot ==="
             find "$STEAM_DEPOT_DIR" -maxdepth 6 -iname "*.dat" -print 2>/dev/null | head -20
             exit 1
           fi
@@ -185,50 +201,13 @@ jobs:
           echo "GAMEASSEMBLY=$GAMEASSEMBLY" >> $GITHUB_ENV
           echo "METADATA=$METADATA"         >> $GITHUB_ENV
 
-      - name: Download IL2CPP Dumper
-        if: steps.manifest.outputs.changed == 'true'
-        run: |
-          VERSION="${{ steps.targets.outputs.dumper_version }}"
-
-          # MlgmXyysd standalone. Actual asset naming:
-          #   Il2CppDumper-linux-v<VERSION>.zip
-          URL="https://github.com/MlgmXyysd/Il2CppDumper-Standalone/releases/download/v${VERSION}-standalone/Il2CppDumper-linux-v${VERSION}.zip"
-
-          echo "Trying: $URL"
-          if ! curl -sfL "$URL" -o /tmp/il2cpp.zip; then
-            echo "::error::Could not download Il2CppDumper Standalone"
-            echo "=== Listing available release assets to verify naming ==="
-            curl -sf "https://api.github.com/repos/MlgmXyysd/Il2CppDumper-Standalone/releases/tags/v${VERSION}-standalone" \
-              | jq -r '.assets[].name' 2>/dev/null || true
-            exit 1
-          fi
-
-          if ! unzip -tq /tmp/il2cpp.zip > /dev/null 2>&1; then
-            echo "::error::Downloaded file is not a valid zip"
-            exit 1
-          fi
-
-          mkdir -p /tmp/il2cpp
-          unzip -q /tmp/il2cpp.zip -d /tmp/il2cpp
-
-          DUMPER_BIN=$(find /tmp/il2cpp -type f -name "Il2CppDumper" | head -n1)
-          if [ -z "$DUMPER_BIN" ]; then
-            echo "::error::Dumper binary not found in extracted archive"
-            find /tmp/il2cpp -maxdepth 3 -type f | head -50
-            exit 1
-          fi
-
-          chmod +x "$DUMPER_BIN"
-          echo "DUMPER_BIN=$DUMPER_BIN" >> $GITHUB_ENV
-          echo "Dumper: $DUMPER_BIN"
-
       - name: Run IL2CPP Dumper
         if: steps.manifest.outputs.changed == 'true'
         run: |
           mkdir -p /tmp/output
           cd /tmp/output
 
-          "$DUMPER_BIN" "$GAMEASSEMBLY" "$METADATA" /tmp/output || {
+          "$HOME/.dotnet/dotnet" "$DUMPER_DLL" "$GAMEASSEMBLY" "$METADATA" /tmp/output || {
             echo "::error::IL2CPP Dumper failed"
             exit 1
           }
