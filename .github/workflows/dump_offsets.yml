@@ -1,22 +1,16 @@
-name: Rust Offset Watch
+name: Rust Offsets
 
 on:
   schedule:
     - cron: '0 */6 * * *'
   workflow_dispatch:
-    inputs:
-      force_check:
-        description: 'Force a check even if the build ID is unchanged'
-        type: boolean
-        default: false
 
 jobs:
-  check:
+  fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     permissions:
       contents: write
-      issues: write
 
     steps:
       - name: Checkout
@@ -25,134 +19,53 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 1
 
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /usr/share/swift /opt/hostedtoolcache/CodeQL &
-          wait
-          sudo rm -rf /opt/hostedtoolcache/node* /opt/hostedtoolcache/Java* /opt/hostedtoolcache/Ruby* /opt/hostedtoolcache/PyPy* &
-          wait
-          sudo docker image prune -af || true
-          df -h /
-
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq curl python3-pip
+          sudo apt-get install -y python3-pip
           pip3 install -r scripts/requirements.txt 2>/dev/null || true
 
-          mkdir -p "$HOME/steamcmd"
-          curl -sqL "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz" \
-            | tar zxvf - -C "$HOME/steamcmd"
-          "$HOME/steamcmd/steamcmd.sh" +quit || true
-          echo "$HOME/steamcmd" >> $GITHUB_PATH
-
-      - name: Resolve manifest and build ID
-        id: manifest
+      - name: Fetch and generate offsets.h
+        id: gen
         run: |
-          APP_ID=252490
-          DEPOT_ID=252495
-
-          MANIFEST_ID=$(curl -sf "https://api.steamcmd.net/v1/info/${APP_ID}" \
-            | jq -r ".data.\"${APP_ID}\".depots.\"${DEPOT_ID}\".manifests.public.gid" 2>/dev/null || echo "")
-          echo "manifest_id=$MANIFEST_ID" >> $GITHUB_OUTPUT
-
-          BUILD_ID=$(curl -sf "https://api.steamcmd.net/v1/info/${APP_ID}" \
-            | jq -r ".data.\"${APP_ID}\".depots.branches.public.buildid" 2>/dev/null || echo "unknown")
-          echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
-
-          CACHED=$(cat .last_buildid 2>/dev/null || echo "0")
-
-          echo "Current build: $BUILD_ID"
-          echo "Cached build:  $CACHED"
-
-          if [ "$BUILD_ID" != "$CACHED" ]; then
-            echo "changed=true" >> $GITHUB_OUTPUT
-            echo "Build changed: $CACHED -> $BUILD_ID"
-          elif [ "${{ inputs.force_check }}" = "true" ]; then
-            echo "changed=true" >> $GITHUB_OUTPUT
-            echo "Forced check"
-          else
-            echo "changed=false" >> $GITHUB_OUTPUT
-            echo "No update"
-          fi
-
-      - name: Download GameAssembly.dll
-        if: steps.manifest.outputs.changed == 'true'
-        id: download
-        env:
-          STEAM_USER: ${{ secrets.STEAM_USER }}
-          STEAM_PASS: ${{ secrets.STEAM_PASS }}
-        run: |
-          if [ -z "$STEAM_USER" ] || [ -z "$STEAM_PASS" ]; then
-            echo "::error::STEAM_USER / STEAM_PASS not configured"
+          python3 scripts/fetch_offsets.py offsets.h
+          if [ ! -s offsets.h ]; then
+            echo "::error::offsets.h empty after generation"
             exit 1
           fi
+          echo "generated=true" >> $GITHUB_OUTPUT
 
-          MANIFEST_ID="${{ steps.manifest.outputs.manifest_id }}"
-          DEPOT_ARGS="252490 252495"
-          [ -n "$MANIFEST_ID" ] && DEPOT_ARGS="252490 252495 $MANIFEST_ID"
-
-          "$HOME/steamcmd/steamcmd.sh" \
-            +@sSteamCmdForcePlatformType windows \
-            +login "$STEAM_USER" "$STEAM_PASS" \
-            +download_depot $DEPOT_ARGS \
-            +quit
-
-          DEPOT_DIR=$(find "$HOME" -type d -name "depot_252495" -print -quit 2>/dev/null || echo "")
-          if [ -z "$DEPOT_DIR" ] || [ ! -d "$DEPOT_DIR" ]; then
-            echo "::error::depot not found"
-            find "$HOME" -type d -name "depot_252495" 2>/dev/null || true
-            find "$HOME" -type d -name "content" -path "*steamapps*" 2>/dev/null || true
-            exit 1
-          fi
-
-          GA="$DEPOT_DIR/GameAssembly.dll"
-          if [ ! -f "$GA" ]; then
-            echo "::error::GameAssembly.dll not found in depot"
-            ls -la "$DEPOT_DIR"
-            exit 1
-          fi
-
-          SHA=$(sha256sum "$GA" | awk '{print $1}')
-          echo "gameassembly_sha=$SHA" >> $GITHUB_OUTPUT
-          echo "GameAssembly SHA256: $SHA"
-
-          PREV_SHA=$(cat .last_gameassembly_sha 2>/dev/null || echo "none")
-          echo "Previous SHA: $PREV_SHA"
-
-          if [ "$SHA" != "$PREV_SHA" ]; then
-            echo "binary_changed=true" >> $GITHUB_OUTPUT
-          else
-            echo "binary_changed=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Save state files
-        if: steps.manifest.outputs.changed == 'true'
+      - name: Show generated header
         run: |
-          echo "${{ steps.manifest.outputs.build_id }}" > .last_buildid
-          echo "${{ steps.download.outputs.gameassembly_sha }}" > .last_gameassembly_sha
+          echo "=== head of offsets.h ==="
+          head -40 offsets.h
+          echo "..."
+          echo "=== line count ==="
+          wc -l offsets.h
 
-      - name: Commit state
-        if: steps.manifest.outputs.changed == 'true'
+      - name: Commit if changed
+        id: commit
         run: |
-          git config user.name 'offsets-watcher'
-          git config user.email 'offsets-watcher@users.noreply.github.com'
-          git add .last_buildid .last_gameassembly_sha
+          git config user.name 'offsets-bot'
+          git config user.email 'offsets-bot@users.noreply.github.com'
+          git add offsets.h
           if git diff --staged --quiet; then
-            echo "No changes to commit"
+            echo "No changes to offsets.h"
+            echo "committed=false" >> $GITHUB_OUTPUT
           else
-            git commit -m "Rust build ${{ steps.manifest.outputs.build_id }}"
+            git commit -m "Update offsets.h from rustoffsets.com"
             git push
+            echo "committed=true" >> $GITHUB_OUTPUT
           fi
 
       - name: Notify on update
-        if: steps.manifest.outputs.changed == 'true' && steps.download.outputs.binary_changed == 'true'
+        if: steps.commit.outputs.committed == 'true'
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
           python3 scripts/notify.py \
-            --title "Rust updated — offsets may need refresh" \
-            --message "Build ${{ steps.manifest.outputs.build_id }}. New GameAssembly SHA. Verify offsets.h." || true
+            --title "Offsets updated" \
+            --message "Fresh offsets.h from rustoffsets.com" || true
 
       - name: Notify on failure
         if: failure()
@@ -160,5 +73,5 @@ jobs:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
           python3 scripts/notify.py \
-            --title "Rust watch failed" \
+            --title "Offset fetch failed" \
             --message "Workflow failed. Check logs." || true
