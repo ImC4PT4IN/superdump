@@ -77,6 +77,37 @@ jobs:
           echo "=== first 30 lines ==="
           head -30 /tmp/rust.h
 
+      - name: Dump rust.h contents
+        if: steps.fetch.outputs.changed == 'true'
+        run: |
+          echo "=== all namespaces in rust.h ==="
+          grep -oP '^\s*namespace\s+\K\w+' /tmp/rust.h | sort -u
+
+          echo ""
+          echo "=== fields in BasePlayer ==="
+          awk '/^\s*namespace BasePlayer\b/,/^}/' /tmp/rust.h
+
+          echo ""
+          echo "=== fields in any class containing Player ==="
+          for ns in $(grep -oP '^\s*namespace\s+\K\w*Player\w*' /tmp/rust.h | sort -u); do
+            echo "--- $ns ---"
+            awk "/^\\s*namespace $ns\\b/,/^}/" /tmp/rust.h | head -60
+          done
+
+          echo ""
+          echo "=== fields in any class containing Camera ==="
+          for ns in $(grep -oP '^\s*namespace\s+\K\w*Camera\w*' /tmp/rust.h | sort -u); do
+            echo "--- $ns ---"
+            awk "/^\\s*namespace $ns\\b/,/^}/" /tmp/rust.h | head -40
+          done
+
+          echo ""
+          echo "=== fields in any class containing Network or Entity ==="
+          for ns in $(grep -oP '^\s*namespace\s+\K\w*(Network|Entity)\w*' /tmp/rust.h | sort -u); do
+            echo "--- $ns ---"
+            awk "/^\\s*namespace $ns\\b/,/^}/" /tmp/rust.h | head -30
+          done
+
       - name: Parse offsets
         if: steps.fetch.outputs.changed == 'true'
         run: |
