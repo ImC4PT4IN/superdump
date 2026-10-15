@@ -1,41 +1,32 @@
 {
-  "app_id": "252490",
-  "depot_id": "252495",
   "output_header": "offsets.h",
-  "classes": {
-    "BaseNetworkable": {
-      "fields": ["clientEntities"],
-      "static": true
-    },
-    "BasePlayer": {
-      "fields": [
-        "_position",
-        "_health",
-        "_maxHealth",
-        "_displayName",
-        "_team",
-        "_isLocalPlayer",
-        "_isDead",
-        "_playerModel",
-        "_userID"
-      ],
-      "static": false
-    },
-    "PlayerModel": {
-      "fields": ["_headPosition"],
-      "static": false
-    },
-    "MainCamera": {
-      "fields": ["_viewMatrix"],
-      "static": true
-    },
-    "BaseCombatEntity": {
-      "fields": ["_health", "_maxHealth"],
-      "static": false
-    },
-    "BaseEntity": {
-      "fields": ["_position", "_rotation"],
-      "static": false
-    }
+  "rust_data_url": "https://raw.githubusercontent.com/etr-dev/Rust-Data/master/output/rust.h",
+  "fields": {
+    "BasePlayer": [
+      "playerModel",
+      "bagCount",
+      "_lookingAt",
+      "startHealth",
+      "skeletonProperties",
+      "baseProtection",
+      "crafting",
+      "loot",
+      "clothingBlocks",
+      "activeItem",
+      "input",
+      "movement",
+      "eyes",
+      "inventory",
+      "metabolism",
+      "modelState"
+    ],
+    "MainCamera": [
+      "mainCamera",
+      "camera",
+      "viewMatrix"
+    ],
+    "BaseNetworkable": [
+      "clientEntities"
+    ]
   }
 }
