@@ -83,19 +83,27 @@ jobs:
           python3 - <<'PYEOF'
           import re
           src = open("/tmp/rust.h").read()
-          ns_re = re.compile(r"^\s*namespace\s+(\w+)", re.M)
+
+          ns_re = re.compile(r"^\s*namespace\s+(\w+)")
           field_re = re.compile(
-              r"inline\s+constexpr\s+::std::ptrdiff_t\s+(\w+)\s*=\s*(0x[0-9A-Fa-f]+)\s*;\s*(?://\s*(.*))?$"
+              r"^\s*inline\s+constexpr\s+::std::ptrdiff_t\s+(\w+)\s*=\s*(0x[0-9A-Fa-f]+)\s*;"
+              r"(?:\s*//\s*(.*))?$"
           )
 
-          # split by namespace
-          blocks = re.split(r"(?=^\s*namespace\s+\w+)", src, flags=re.M)
-          for b in blocks:
-              nm = ns_re.match(b)
-              if not nm:
+          current = None
+          buckets = {}
+
+          for line in src.splitlines():
+              nm = ns_re.match(line)
+              if nm:
+                  current = nm.group(1)
+                  buckets.setdefault(current, [])
                   continue
-              name = nm.group(1)
-              fields = field_re.findall(b)
+              fm = field_re.match(line)
+              if fm and current:
+                  buckets[current].append((fm.group(1), fm.group(2), fm.group(3) or ""))
+
+          for name, fields in buckets.items():
               if not fields:
                   continue
               print(f"===== {name} ({len(fields)} fields) =====")
