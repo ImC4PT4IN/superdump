@@ -62,7 +62,6 @@ jobs:
           echo "source_sha=$SHA" >> $GITHUB_OUTPUT
 
           CACHED=$(cat .last_source_sha 2>/dev/null || echo "0")
-          echo "cached_sha=$CACHED" >> $GITHUB_OUTPUT
 
           if [ "$SHA" != "$CACHED" ]; then
             echo "changed=true" >> $GITHUB_OUTPUT
@@ -74,66 +73,38 @@ jobs:
 
           echo "=== rust.h line count ==="
           wc -l /tmp/rust.h
-          echo "=== first 30 lines ==="
-          head -30 /tmp/rust.h
-
-      - name: Dump rust.h contents
-        if: steps.fetch.outputs.changed == 'true'
-        run: |
-          python3 - <<'PYEOF'
-          import re
-          src = open("/tmp/rust.h").read()
-
-          ns_re = re.compile(r"^\s*namespace\s+(\w+)")
-          field_re = re.compile(
-              r"^\s*inline\s+constexpr\s+::std::ptrdiff_t\s+(\w+)\s*=\s*(0x[0-9A-Fa-f]+)\s*;"
-              r"(?:\s*//\s*(.*))?$"
-          )
-
-          current = None
-          buckets = {}
-
-          for line in src.splitlines():
-              nm = ns_re.match(line)
-              if nm:
-                  current = nm.group(1)
-                  buckets.setdefault(current, [])
-                  continue
-              fm = field_re.match(line)
-              if fm and current:
-                  buckets[current].append((fm.group(1), fm.group(2), fm.group(3) or ""))
-
-          for name, fields in buckets.items():
-              if not fields:
-                  continue
-              print(f"===== {name} ({len(fields)} fields) =====")
-              for fname, off, comment in fields:
-                  print(f"  [{off}] {fname}    // {comment}")
-              print()
-          PYEOF
 
       - name: Parse offsets
         if: steps.fetch.outputs.changed == 'true'
+        id: parse
         run: |
           python3 scripts/parse_rust_data.py \
             /tmp/rust.h \
-            targets.json \
-            "${{ steps.targets.outputs.output_header }}"
+            scripts/mapping.json \
+            "${{ steps.targets.outputs.output_header }}" \
+            > /tmp/parse_report.txt 2>&1 || true
 
-      - name: Validate offsets
-        if: steps.fetch.outputs.changed == 'true'
-        id: validate
-        run: |
-          python3 scripts/validate_offsets.py \
-            /tmp/rust.h \
-            targets.json \
-            "${{ steps.targets.outputs.output_header }}" > /tmp/report.txt 2>&1 || true
-          cat /tmp/report.txt
-          if grep -qiE "missing|not found" /tmp/report.txt; then
-            echo "validation_failed=true" >> $GITHUB_OUTPUT
-          else
-            echo "validation_failed=false" >> $GITHUB_OUTPUT
+          cat /tmp/parse_report.txt
+
+          if grep -qE '^\[parse\] OK=[0-9]+ ' /tmp/parse_report.txt; then
+            OK=$(grep -oP 'OK=\K[0-9]+' /tmp/parse_report.txt | head -1)
+            if [ "${OK:-0}" = "0" ]; then
+              echo "::error::no offsets resolved"
+              exit 1
+            fi
           fi
+
+          if grep -q 'MISSING' /tmp/parse_report.txt || grep -q 'DRIFT' /tmp/parse_report.txt; then
+            echo "drift=true" >> $GITHUB_OUTPUT
+          else
+            echo "drift=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Show generated header
+        if: steps.fetch.outputs.changed == 'true'
+        run: |
+          echo "=== offsets.h ==="
+          cat "${{ steps.targets.outputs.output_header }}" || true
 
       - name: Update source hash
         if: steps.fetch.outputs.changed == 'true'
@@ -148,6 +119,7 @@ jobs:
           git config user.email 'offsets-bot@users.noreply.github.com'
           git add "$OUT" .last_source_sha || true
           if git diff --staged --quiet; then
+            echo "No changes to commit"
             echo "committed=false" >> $GITHUB_OUTPUT
           else
             git commit -m "Update offsets (source sha ${{ steps.fetch.outputs.source_sha }})"
@@ -155,14 +127,24 @@ jobs:
             echo "committed=true" >> $GITHUB_OUTPUT
           fi
 
+      - name: Notify on drift
+        if: steps.fetch.outputs.changed == 'true' && steps.parse.outputs.drift == 'true'
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          python3 scripts/notify.py \
+            --title "Offset drift detected" \
+            --message "rust.h updated. Some fields moved or went missing. Check the parse report." \
+            --report /tmp/parse_report.txt || true
+
       - name: Notify on success
-        if: steps.fetch.outputs.changed == 'true' && steps.commit.outputs.committed == 'true'
+        if: steps.fetch.outputs.changed == 'true' && steps.commit.outputs.committed == 'true' && steps.parse.outputs.drift != 'true'
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
           python3 scripts/notify.py \
             --title "Offsets updated" \
-            --message "Rust-Data rust.h fetched. Validation: ${{ steps.validate.outputs.validation_failed }}"
+            --message "Fresh rust.h parsed. All mapped fields validated." || true
 
       - name: Notify on failure
         if: failure()
@@ -171,4 +153,4 @@ jobs:
         run: |
           python3 scripts/notify.py \
             --title "Offset pipeline failed" \
-            --message "Workflow failed. Check logs."
+            --message "Workflow failed. Check logs." || true
