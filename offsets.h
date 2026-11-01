@@ -3,8 +3,8 @@
 
 // Auto-generated from rustoffsets.com
 // build_id:  25231061
-// timestamp: 2026-10-22T20:39:33.296270+00:00
-// generated: 2026-11-01T12:50:03.252565+00:00
+// timestamp: 2026-11-01T13:52:13.747072+00:00
+// generated: 2026-11-01T21:47:43.530881+00:00
 
 namespace Offsets {
 
