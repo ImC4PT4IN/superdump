@@ -3,8 +3,8 @@
 
 // Auto-generated from rustoffsets.com
 // build_id:  25231061
-// timestamp: 2026-11-06T14:39:33.014614+00:00
-// generated: 2026-11-07T05:03:58.121131+00:00
+// timestamp: 2026-11-07T10:09:32.984672+00:00
+// generated: 2026-11-07T12:38:15.414930+00:00
 
 namespace Offsets {
 
@@ -13,8 +13,8 @@ namespace Offsets {
     constexpr uintptr_t _root_camera_pointer = 0x10C62B28;
     constexpr uintptr_t _root_tod_sky_pointer = 0x10CC1C90;
     constexpr uintptr_t _root_console_pointer = 0x10C08B30;
-    constexpr uintptr_t _root_convar_graphics_pointer = 0xF0FEC78;
-    constexpr uintptr_t _root_convar_admin_pointer = 0xF035880;
+    constexpr uintptr_t _root_convar_graphics_pointer = 0xF083240;
+    constexpr uintptr_t _root_convar_admin_pointer = 0xF069EB0;
     constexpr uintptr_t _root_Il2cppHandle = 0x10CA7920;
     constexpr uintptr_t _root_WorldOffset = 0x10BF80B8;
     constexpr uintptr_t _root_PhysxOffset = 0x1C3B3D0;  // engine internal
@@ -388,7 +388,7 @@ namespace Offsets {
     constexpr uintptr_t World_size = 0x350;
 
     // ── GameManager ──
-    constexpr uintptr_t GameManager_Class = 0xF030440;
+    constexpr uintptr_t GameManager_Class = 0xF0CE228;
     constexpr uintptr_t GameManager_instance = 0x38;
     constexpr uintptr_t GameManager_prefab_pool_collection = 0x10;
 
