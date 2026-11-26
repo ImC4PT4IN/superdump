@@ -4,7 +4,7 @@
 // Auto-generated from rustoffsets.com
 // build_id:  25231061
 // timestamp: 2026-11-25T10:19:30.590957+00:00
-// generated: 2026-11-25T21:14:46.432361+00:00
+// generated: 2026-11-26T07:19:18.596982+00:00
 
 namespace Offsets {
 
